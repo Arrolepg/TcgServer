@@ -23,6 +23,16 @@ add_executable(TcgServer
     src/logger/Logger.h
     src/utils/Utils.cpp
     src/utils/Utils.h
+
+    src/config/Config.cpp
+    src/config/Config.h
+)
+
+add_custom_command(TARGET TcgServer POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/config.ini"
+        "$<TARGET_FILE_DIR:TcgServer>/config.ini"
+    COMMENT "Copying config.ini to output directory"
 )
 
 target_include_directories(TcgServer PRIVATE src)
