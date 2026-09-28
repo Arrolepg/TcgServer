@@ -1,0 +1,24 @@
+services:
+  tcgserver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tcgserver:latest
+    container_name: tcgserver
+
+    ports:
+      - "8080:8080"
+
+    volumes:
+      - tcg-config:/app/config
+
+    restart: unless-stopped
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  tcg-config:
