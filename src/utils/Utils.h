@@ -1,7 +1,12 @@
 #pragma once
 #include <string>
 
-namespace Utils {
-    std::string ansiToUtf8(const std::string& ansi);
-    std::string generateRoomId();
-}
+class Utils {
+public:
+    Utils() = delete;
+    Utils(const Utils&) = delete;
+    Utils& operator=(const Utils&) = delete;
+
+    static std::string ansiToUtf8(const std::string& ansi);
+    static std::string generateRoomId();
+};
