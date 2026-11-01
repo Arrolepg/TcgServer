@@ -64,7 +64,7 @@ void Session::start() {
 
     boost::system::error_code ndEc;
     // off Neigl algorithm
-    socket_.set_option(boost::asio::ip::tcp::no_delay(true), ndEc);
+    socket_.set_option(tcp::no_delay(true), ndEc);
     if (ndEc) {
         logWarn("Could not enable TCP_NODELAY: " + ndEc.message());
     }
