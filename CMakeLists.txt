@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(Boost REQUIRED)
+find_package(Boost CONFIG REQUIRED COMPONENTS system)
 find_package(Threads REQUIRED)
 
 add_executable(TcgServer
@@ -39,6 +39,7 @@ target_include_directories(TcgServer PRIVATE src)
 
 target_link_libraries(TcgServer PRIVATE
     Boost::boost
+    Boost::system
     Threads::Threads
 )
 
