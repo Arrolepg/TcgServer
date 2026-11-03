@@ -26,6 +26,7 @@ add_executable(TcgServer
 
     src/config/Config.cpp
     src/config/Config.h
+    src/room/PlayerState.h
 )
 
 add_custom_command(TARGET TcgServer POST_BUILD

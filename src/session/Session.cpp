@@ -254,6 +254,11 @@ void Session::handleJoinRoom(Protocol::Reader& r) {
             " payload=" + std::to_string(w.data().size()) + "B" +
             " total=" + std::to_string(pkt.size()) + "B");
     send(pkt);
+
+    if (room->playerCount() == 2) {
+        logInfo("Roon is full -> starting match: id = " + roomId);
+        room->initializeGame();
+    }
 }
 
 void Session::handleListRooms() {

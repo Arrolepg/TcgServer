@@ -14,6 +14,8 @@ public:
         CreateRoomResponse = 0x81,
         JoinRoomResponse = 0x82,
         ListRoomsResponse = 0x83,
+
+        MatchStart = 0x90,
     };
 
     static constexpr std::size_t kHeaderSize = 3;

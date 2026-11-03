@@ -29,8 +29,14 @@ public:
         return players_.size();
     }
 
+    void initializeGame();
+
 private:
     std::string id_;
     std::string hostIp_;
     std::set<std::shared_ptr<Session>> players_;
+
+    std::shared_ptr<Session> hostSession_;
+    std::shared_ptr<Session> guestSession_;
+    bool gameStarted_;
 };
