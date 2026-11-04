@@ -17,7 +17,6 @@ public:
         CreateRoom = 0x01,
         JoinRoom = 0x02,
         ListRooms = 0x03,
-        RequestStateSync = 0x04,
 
         Error = 0x80,
         CreateRoomResponse = 0x81,

@@ -37,8 +37,6 @@ public:
 
     void broadcastStateSync();
 
-    void sendCurrentStateTo(const std::shared_ptr<Session>& to);
-
 private:
     std::vector<char> buildMatchStartPayload(const PlayerState& me, const PlayerState& opp) const;
     std::vector<char> buildStateSyncPayload(const PlayerState& me, const PlayerState& opp) const;

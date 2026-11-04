@@ -194,8 +194,6 @@ void Room::initializeGame() {
     sendMatchStart(hostSession_, p1, p2);
     sendMatchStart(guestSession_, p2, p1);
 
-    broadcastStateSync();
-
     Logger::info("ROOM:" + id_, "Match start complete");
 }
 
@@ -276,28 +274,4 @@ void Room::broadcastStateSync() {
 
     pushTo(hostSession_,  hostState_,  guestState_);
     pushTo(guestSession_, guestState_, hostState_);
-}
-
-void Room::sendCurrentStateTo(const std::shared_ptr<Session>& to) {
-    if (!hasMatchState_) return;
-
-    const PlayerState* you = nullptr;
-    const PlayerState* opp = nullptr;
-    if (to == hostSession_) {
-        you = &hostState_;
-        opp = &guestState_;
-    }
-    else if (to == guestSession_) {
-        you = &guestState_;
-        opp = &hostState_;
-    }
-    else return;
-
-    auto payload = buildStateSyncPayload(*you, *opp);
-    auto pkt = Protocol::buildPacket(Protocol::Opcode::StateSync, payload);
-    Logger::info("ROOM:" + id_,
-                 ">> StateSync (on-demand) seq=" + std::to_string(stateSeq_) +
-                 " to " + you->playerId +
-                 " payload=" + std::to_string(payload.size()) + "B");
-    to->send(pkt);
 }

@@ -11,7 +11,7 @@ namespace {
         {5, "CrushingBlow"},
         {6, "PiercingShot"},
         {7, "IronWall"},
-        {9, "CounterStance"},
+        {8, "CounterStance"},
         {9, "BarrierCharm"}
     };
 
