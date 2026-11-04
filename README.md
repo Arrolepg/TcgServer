@@ -1,11 +1,12 @@
 # TcgServer
 
-Сервер для карточной игры (TCG), написанный на C++17 с использованием Boost.Asio.
-Сервер принимает TCP-подключения, позволяет создавать игровые комнаты, присоединяться к ним
-и получать список доступных комнат.
+Сервер для карточной игры (TCG) на C++17 с использованием Boost.Asio.
+Принимает TCP-подключения, позволяет создавать игровые комнаты, присоединяться
+к ним и получать список доступных комнат. При заполнении комнаты (2/2)
+сервер инициализирует матч и пушит клиентам полное состояние игры.
 
-Протокол - бинарный, с length-prefixed фреймингом. Общение идёт байтами с явными типами и длинами, 
-без `\0`-терминаторов и текстовых разделителей. 
+Протокол - бинарный, с length-prefixed фреймингом. Общение идёт байтами
+с явными типами и длинами, без `\0`-терминаторов и текстовых разделителей.
 
 ---
 
@@ -18,6 +19,11 @@
 - [Запуск](#запуск)
 - [Docker](#docker)
 - [Сетевой протокол](#сетевой-протокол)
+   - [Версия wire-формата](#версия-wire-формата)
+   - [Идентификация карт](#идентификация-карт)
+   - [Старт матча](#старт-матча)
+   - [Синхронизация состояний](#синхронизация-состояний)
+   - [Инициализация матча](#инициализация-матча)
 - [Конфигурация](#конфигурация)
 
 ---
@@ -26,11 +32,24 @@
 
 - Приём TCP-подключений (асинхронный ввод-вывод через Boost.Asio).
 - Создание игровых комнат с уникальным ID.
-- Присоединение игроков к существующим комнатам (максимум 2 игрока на комнату).
+- Присоединение игроков к существующим комнатам (максимум 2 игрока).
 - Получение списка доступных комнат.
 - Автоматическое удаление пустых комнат.
+- Инициализация матча при заполнении комнаты (2/2): раздача карт, атрибуты,
+  бросок кубика для определения первого хода, снимок руки и колоды.
+- Старт матча - один раз на игрока после заполнения комнаты.
+- Синхронизация - полный snapshot состояния; сервер шлёт его
+  сразу после старта матча и по запросу клиента.
+- Хранение состояния игроков в `Room` между отправками: `hand` / `deck` /
+  `discard` / `attributes` не пересоздаются на каждый пакет.
+- Идентификация карт по стабильным `u16 id` - 2 байта на карту вместо
+  `RowName` (`u16 length + UTF-8`).
+- Версия `CardRegistry` (FNV-1a хэш) в шапке `MatchStart` / `StateSync`
+  для детекта рассинхронизации карт между сервером и клиентом.
+- Отслеживание фазы игры: `Init` / `Playing` / `Finished` плюс `WinnerPlayerId`.
 - Бинарный wire-формат с length-prefix фреймингом.
-- Логирование с уровнями (`TRACE`/`DEBUG`/`INFO`/`WARN`/`ERROR`/`FATAL`), миллисекундами, ID сессии, IP клиента и hex-дампами.
+- Логирование с уровнями (`TRACE`/`DEBUG`/`INFO`/`WARN`/`ERROR`/`FATAL`),
+  миллисекундами, ID сессии, IP клиента и hex-дампами.
 - Конфигурация через `config.ini` (уровень логов, порт).
 - Кроссплатформенный код (Windows / Linux / macOS).
 - Готов к запуску в Docker (multi-stage build, distroless runtime).
@@ -49,8 +68,9 @@
 | **Docker** (опционально) | 20.10+ | Запуск в контейнере |
 | **Git** | любая | Клонирование репозитория |
 
-> **Примечание.** Boost.Asio - header-only библиотека. Под Windows требуется линковка
-> с системными библиотеками `ws2_32` и `mswsock`. Под Linux - с `pthread`.
+> **Примечание.** Boost.Asio - header-only библиотека. Под Windows требуется
+> линковка с системными библиотеками `ws2_32` и `mswsock`. Под Linux -
+> с `pthread`.
 
 ---
 
@@ -58,21 +78,13 @@
 
 ### Windows + vcpkg (рекомендуется)
 
-1. **Установите Visual Studio 2022** с компонентом «Разработка классических приложений на C++».
+1. **Установите Visual Studio 2022** с компонентом «Разработка классических
+   приложений на C++». Скачать: <https://visualstudio.microsoft.com/>
 
-   Скачать: <https://visualstudio.microsoft.com/>
-
-
-2. **Установите CMake** (или используйте версию, идущую с VS).
-
+2. **Установите CMake** (или используйте версию из VS).
    Скачать: <https://cmake.org/download/>
 
-
 3. **Установите vcpkg.**
-
-   Клонируйте репозиторий vcpkg в удобное место. В примерах ниже используется
-   `C:\vcpkg`, но вы можете выбрать любой другой путь - главное, запомните его,
-   он понадобится при сборке проекта.
 
    ```powershell
    git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
@@ -86,9 +98,9 @@
    .\vcpkg install boost-asio:x64-windows
    ```
 
-   Этой команды достаточно. vcpkg автоматически подтянет транзитивные зависимости:
-   `boost-system`, `boost-core`, `boost-config`, `boost-array` и другие.
-
+   Этой команды достаточно. vcpkg автоматически подтянет транзитивные
+   зависимости: `boost-system`, `boost-core`, `boost-config`, `boost-array`
+   и другие.
 
 5. **Проверьте установку.**
 
@@ -96,7 +108,8 @@
    .\vcpkg list | Select-String "boost-"
    ```
 
-   В списке должны присутствовать `boost-asio:x64-windows` и `boost-system:x64-windows`.
+   В списке должны присутствовать `boost-asio:x64-windows` и
+   `boost-system:x64-windows`.
 
 ### Linux
 
@@ -142,8 +155,9 @@ brew install cmake boost
    cmake --build . --config Debug
    ```
 
-   Или откройте `build\TcgServer.sln` в Visual Studio / Rider и нажмите **Build**.
-   Конфигурацию (Debug / Release) можно переключить в выпадающем списке вверху IDE.
+   Или откройте `build\TcgServer.sln` в Visual Studio / Rider и нажмите
+   **Build**. Конфигурацию (Debug / Release) можно переключить в выпадающем
+   списке вверху IDE.
 
 ### Linux
 
@@ -154,7 +168,8 @@ cmake .. -DCMAKE_BUILD_TYPE=Debug
 cmake --build . --parallel
 ```
 
-Если `cmake --build` недоступен в старой версии - используйте `make -j$(nproc)`.
+Если `cmake --build` недоступен в старой версии - используйте
+`make -j$(nproc)`.
 
 ### macOS
 
@@ -165,7 +180,8 @@ cmake .. -DCMAKE_BUILD_TYPE=Debug
 cmake --build . --parallel
 ```
 
-Если `cmake --build` недоступен - используйте `make -j$(sysctl -n hw.ncpu)`.
+Если `cmake --build` недоступен - используйте
+`make -j$(sysctl -n hw.ncpu)`.
 
 ---
 
@@ -201,13 +217,28 @@ cmake --build . --parallel
 
 ### Краткое описание модулей
 
-- **Server** - асинхронно принимает TCP-подключения, создаёт `Session` на каждого клиента.
-- **Session** - обрабатывает входящие пакеты, хранит состояние игрока (имя, комнату),
-  ведёт аккумулятор входящих байт и парсит пакеты по length-prefix.
-- **Room** - модель игровой комнаты, хранит игроков и IP хоста.
-- **Protocol** - бинарный `Writer`/`Reader` (u8/u16/u32/string), сборка и парсинг фреймов.
+- **Server** - асинхронно принимает TCP-подключения, создаёт `Session`
+  на каждого клиента.
+- **Session** - обрабатывает входящие пакеты, хранит состояние игрока
+  (имя, комнату), ведёт аккумулятор входящих байт и парсит пакеты
+  по length-prefix.
+- **PlayerState** - снимок состояния одного игрока в комнате:
+  `playerId` / `playerName`; `attributes` (массив `AttrValue` - max/current
+  для `health` / `mana` / `defence`); `hand` / `deck` / `discard` как
+  `std::vector<uint16_t>` (CardRegistry ids). Дефолты атрибутов
+  (15 / 10 / 10) задаются в конструкторе `PlayerState::PlayerState()`.
+- **Room** - модель игровой комнаты. Хранит игроков, IP хоста и **полное
+  состояние матча** (`hostState_` / `guestState_`): hand, deck, discard,
+  attributes, game phase, turn, winner. Сохраняется между отправками
+  `MatchStart` / `StateSync`.
+- **CardRegistry** - таблица `{u16 id, string rowName}` на сервере.
+  Ручной дубликат `DT_Cards` (standalone C++ не читает UAsset). `version()` -
+  FNV-1a от таблицы, для детекта рассинхронизации с клиентом. См.
+  [Идентификация карт](#идентификация-карт).
+- **Protocol** - бинарный `Writer` / `Reader` (u8 / u16 / u32 / string),
+  сборка и парсинг фреймов.
 - **Logger** - уровни, компоненты, ID сессии, hex-дампы, потокобезопасность.
-- **Utils** - преобразование ANSI -> UTF-8, генерация ID комнат.
+- **Utils** - преобразование ANSI → UTF-8, генерация ID комнат.
 - **Config** - парсинг `config.ini`.
 
 ---
@@ -216,8 +247,10 @@ cmake --build . --parallel
 
 Сервер собирается и запускается в Docker. Используется **multi-stage build**:
 
-- **Stage 1 (builder)** - `debian:bookworm-slim` с полным toolchain (GCC, CMake, Boost SDK).
-- **Stage 2 (runtime)** - `gcr.io/distroless/cc-debian12:nonroot`, содержащий только бинарник и минимальные системные библиотеки (~25 МБ против ~1.5 ГБ).
+- **Stage 1 (builder)** - `debian:bookworm-slim` с полным toolchain
+  (GCC, CMake, Boost SDK).
+- **Stage 2 (runtime)** - `gcr.io/distroless/cc-debian12:nonroot`, содержащий
+  только бинарник и минимальные системные библиотеки (~25 МБ против ~1.5 ГБ).
 
 ### Требования
 
@@ -237,10 +270,10 @@ docker compose up -d --build
 
 Что произойдёт:
 
-1. Собирается образ `tcgserver:latest` (первая сборка ~2-5 минут).
+1. Собирается образ `tcgserver:latest` (первая сборка ~2–5 минут).
 2. Запускается контейнер `tcgserver` в фоне.
 3. Порт `8080` пробрасывается на хост.
-4. Создадются два named volume: `tcgserver_tcg-config` и `tcgserver_tcg-logs`.
+4. Создаются два named volume: `tcgserver_tcg-config` и `tcgserver_tcg-logs`.
 
 ### Просмотр логов
 
@@ -297,7 +330,8 @@ docker volume rm tcgserver_tcg-config
 docker compose up -d
 ```
 
-После этого volume инициализируется тем `config.ini`, который запечён в образ (из корня проекта на момент сборки).
+После этого volume инициализируется тем `config.ini`, который запечён
+в образ (из корня проекта на момент сборки).
 
 ### Что внутри образа
 
@@ -306,13 +340,27 @@ docker compose up -d
 | **builder (отбрасывается)** | GCC, CMake, git, Boost SDK, исходники |
 | **runtime (финальный)** | `TcgServer`, `config.ini`, `glibc`, `libstdc++` |
 
-Boost SDK **не попадает в runtime** - Asio header-only, весь нужный код уже в бинарнике при сборке.
+Boost SDK **не попадает в runtime** - Asio header-only, весь нужный код уже
+в бинарнике при сборке.
 
 ---
 
 ## Сетевой протокол
 
 Протокол - бинарный, length-prefixed.
+
+### Версия wire-формата
+
+Текущая версия - **v2** (`Protocol::kWireVersion = 2`). Она встроена в шапку
+опкодов `MatchStart` и `StateSync` как `u32 wire_version`.
+
+- **v1** - карты идентифицировались `RowName` (`u16 len + UTF-8`).
+- **v2** - карты идентифицируются `u16 id`; добавлены `registry_version`,
+  `GamePhase`, `discard`, extension-fields.
+
+Клиент проверяет `wire_version` при парсинге. При несовпадении пакет
+отвергается, в лог уходит `wire version mismatch`. **v2 не совместим с v1** -
+сервер и клиент нужно пересобирать вместе.
 
 ### Формат пакета
 
@@ -344,6 +392,7 @@ Boost SDK **не попадает в runtime** - Asio header-only, весь ну
 | `u16` | 2 байта, little-endian |
 | `u32` | 4 байта, little-endian |
 | `string` | `u16 length` + `length` байт UTF-8 |
+| `cardId` | 2 байта, `u16` little-endian (см. [Идентификация карт](#идентификация-карт)) |
 
 **Пример:** строка `"Alice"` в wire-формате:
 
@@ -366,6 +415,52 @@ Boost SDK **не попадает в runtime** - Asio header-only, весь ну
    |- length всего пакета = 8
 ```
 
+### Идентификация карт
+
+В wire-формате карта - это **`u16 id`** (2 байта). `rowName`
+(например, `"Fireball"`) живёт только на концах соединения.
+
+**Единый источник правды - `DT_Cards`** (DataTable в UE, UAsset).
+
+**Сервер** не может читать UAsset, поэтому держит
+свою таблицу `{id, rowName}`. Синхронизация с `DT_Cards` - ручная.
+
+**Проверка консистентности.** В шапке `MatchStart` и `StateSync` сервер шлёт
+`u32 registry_version` - FNV-1a хэш от `(id, rowName)` всей таблицы. Клиент
+считает хэш от и сравнивает. При расхождении:
+
+- матч продолжается;
+- в лог клиента - `CardRegistry mismatch`;
+- для неизвестных id клиент подставляет `<unknown>` вместо имени.
+
+Это защита от типичной ошибки «добавил карту только на сервере».
+
+**Требования к `rowName`** (единый ключ на сервере и клиенте; в `DT_Cards`
+это `RowName`, в `server/CardRegistry.cpp` - поле `rowName`):
+
+| Требование |
+|---|
+| **Точное совпадение** (case-sensitive) |
+| Без пробелов по краям |
+| Без `,` и `"` |
+| Уникален |
+| ≤ 255 символов |
+
+Если версии разошлись из-за опечатки - сервер продолжит работать,
+но клиент покажет `<unknown>` для этой карты. Ловится по
+`CardRegistry mismatch` в логе клиента.
+
+**Добавление новой карты:**
+
+1. В `DT_Cards` добавить строку с новым уникальным `CardId`
+   (следующий свободный, не переиспользовать старые).
+2. В `CardRegistry.cpp` на сервере добавить `{N, "RowName"}`.
+3. Исправить `CardRegistry.cpp` в плагине.
+4. `version()` пересчитается автоматически при сборке.
+
+**Лимит id.** `u16` -> максимум **65 535 карт**. Когда упрётесь - `u32`
+и bump `kWireVersion` до 3.
+
 ### Опкоды клиента
 
 | Код | Название | Payload |
@@ -373,6 +468,7 @@ Boost SDK **не попадает в runtime** - Asio header-only, весь ну
 | `0x01` | `CreateRoom` | `string playerName` |
 | `0x02` | `JoinRoom` | `string roomId` + `string playerName` |
 | `0x03` | `ListRooms` | - (пусто) |
+| `0x04` | `RequestStateSync` | - (пусто); запрос полного `StateSync` |
 
 ### Опкоды сервера
 
@@ -382,9 +478,146 @@ Boost SDK **не попадает в runtime** - Asio header-only, весь ну
 | `0x81` | `CreateRoomResponse` | `string roomId` |
 | `0x82` | `JoinRoomResponse` | `string roomId` |
 | `0x83` | `ListRoomsResponse` | `u16 count` + `count × (string roomId, string hostIp, u8 playersCount)` |
+| `0x90` | `MatchStart` | см. [MatchStart (0x90)](#matchstart-0x90) |
+| `0x91` | `StateSync` | см. [StateSync (0x91)](#statesync-0x91) |
 
-> **Примечание.** Если в `ListRoomsResponse` нет ни одной комнаты, `count = 0`
-> и payload содержит только `u16 0x0000`.
+> **Примечание.** Если в `ListRoomsResponse` нет ни одной комнаты,
+> `count = 0` и payload содержит только `u16 0x0000`.
+
+### Старт матча
+
+Сервер шлёт обоим игрокам **один раз** при заполнении комнаты (2/2).
+Содержит всё, что нужно клиенту для входа в матч.
+
+> **BP-контракт (UE):** формат соответствует `FST_MatchInitData`.
+
+```
+u32 wire_version
+u32 registry_version
+str room_id
+str your_player_id
+str your_player_name
+u16 your_attr_count
+u16 your_hand_count
+u16 your_deck_count
+str opponent_player_id
+str opponent_player_name
+u16 opp_attr_count
+u16 opp_hand_count
+str first_player_id
+u8  dice_roll
+```
+
+`your_attr_count = opp_attr_count = 3` - `health` / `mana` / `defence`.
+Порядок и `rowName` фиксированы (`kAttrs` в `Room.cpp`).
+
+### Синхронизация состояний
+
+Полный snapshot состояния матча. Сервер шлёт:
+
+- **сразу после `MatchStart`** в `initializeGame` (`state_seq = 1`);
+- по запросу клиента `RequestStateSync (0x04)` - с тем же `state_seq`;
+
+Клиент хранит последний `LastStateSync` для catch-up и рендерит UI.
+
+> **BP-контракт (UE):** формат соответствует `FST_StateSyncData`.
+
+```
+u32 wire_version
+u32 registry_version
+u32 state_seq
+str room_id
+u8  game_phase
+u8  turn_number
+str current_turn_player_id
+u8  dice_roll
+str winner_player_id
+
+str your_player_id
+str your_player_name
+u16 your_attr_count
+u16 your_hand_count
+u16 your_deck_count
+u16 your_discard_count
+
+str opponent_player_id
+str opponent_player_name
+u16 opp_attr_count
+u16 opp_hand_count
+u16 opp_deck_count
+u16 opp_discard_count
+
+u16 ext_count
+```
+
+`state_seq` монотонно растёт: `1` - старт, `2` - после первого действия и т.д.
+Клиент может игнорировать пакеты с `state_seq` меньше уже применённого
+(защита от переупорядочивания).
+
+`extensions` - контейнер `key -> value` для будущих правил (эффекты карт,
+щиты, дебаффы). Сервер заполнит его, когда появятся правила. Клиент,
+не знающий про поле, просто проигнорирует запись.
+
+### Инициализация матча
+
+Полный flow от подключения до старта матча:
+
+```
+client A              server                   client B
+  |                     |                         |
+  |-- TCP connect ----->|                         |
+  |                     |<------ TCP connect -----|
+  |                     |                         |
+  |-- CreateRoom("A") ->|                         |
+  |<-- CreateRoomResp(roomId) ------------------|
+  |                     |                         |
+  |                     |<-- JoinRoom(roomId,"B")-|
+  |                     |--- JoinRoomResp(roomId)->|
+  |                     |                         |
+  |                     | (players.size() == 2)   |
+  |                     | initializeGame()        |
+  |                     |                         |
+  |<-- MatchStart (0x90)|--- MatchStart (0x90) -->|
+  |<-- StateSync seq=1 -|--- StateSync seq=1 ---->|
+  |                     |                         |
+  | (UI готов)          |                         | (UI готов)
+```
+
+Ключевое:
+
+1. **`MatchStart` - один раз** на игрока, при `room->playerCount() == 2`.
+2. **`StateSync seq=1` - сразу после `MatchStart`**, отдельным пакетом.
+   Клиент обрабатывает оба независимо.
+3. Сервер **не шлёт ACK** - клиент после `CreateRoomResponse` /
+   `JoinRoomResponse` просто ждёт `MatchStart`.
+4. Если `MatchStart` или `StateSync` пришёл **до** того, как клиентский UI
+   подписался на делегаты - все нормально: серверная часть хранит
+   `LastMatchInit` / `LastStateSync`, клиент делает catch-up через
+   `HasMatchInit()` / `GetLastMatchInit()` и `HasStateSync()` /
+   `GetLastStateSync()` (см. плагин UE).
+
+#### RequestStateSync (0x04)
+
+Клиент запрашивает полный снимок заново. Сервер отвечает **внеочередным
+`StateSync`** с тем же `state_seq` (не инкрементит).
+
+**Когда использовать:**
+
+- После переподключения (клиент потерял TCP, переподключился - нужно
+  восстановить UI, не дожидаясь action-опкода).
+- После `CardRegistry mismatch` - клиент может перечитать DT и запросить
+  снимок.
+- Для дебага - вручную дёрнуть `UTcgNetworkSubsystem::RequestStateSync()`
+  из BP.
+
+**Ограничения:**
+
+- Автоматического reconnect нет - клиент должен сам вызвать `Connect()` +
+  `JoinRoom()` при разрыве.
+- `RequestStateSync` работает **только в активной комнате**. Если клиент
+  вышел из комнаты - сервер шлёт `Error("Not in a room")`.
+- При reconnect клиент попадёт в **новую** комнату (старая уже удалена
+  сервером после `removePlayer`), поэтому `state_seq` начнётся с 1.
 
 ### Пример обмена
 
@@ -426,9 +659,14 @@ Boost SDK **не попадает в runtime** - Asio header-only, весь ну
 | Границы пакета | Неявные, угадываются | Явные, `u16 length` в начале |
 | Границы строки | `\0`-терминатор | `u16 length` перед байтами |
 | Спецсимволы (`\0`, `;`, `,`) | Ломают протокол | Не влияют |
-| Числа | ASCII-цифры (переменная длина) | Фиксированные `u8`/`u16`/`u32` |
-| TCP-склейка/разрезание | Ломает парсинг | Обрабатывается корректно |
+| Числа | ASCII-цифры (переменная длина) | Фиксированные `u8` / `u16` / `u32` |
+| TCP-склейка / разрезание | Ломает парсинг | Обрабатывается корректно |
 | Парсинг | Сканирование байт | Прямое чтение по длине |
+
+**Экономия от v2:** карта - 2 байта (`u16 id`) вместо ~10–20
+байт (`u16 len + UTF-8 rowName`). Для стартовой руки (5 карт) + колоды
+(15 карт) экономия в `MatchStart` - около 120–240 байт на игрока.
+В `StateSync` (рука + колода + discard каждого) - ещё больше.
 
 ---
 
@@ -448,7 +686,8 @@ port = 8080
 | `log_level` | `trace`, `debug`, `info`, `warn`, `error`, `fatal` | `debug` | Минимальный уровень логирования |
 | `port` | 1–65535 | `8080` | TCP-порт сервера |
 
-Незнакомые ключи игнорируются. Некорректный `port` - остаётся значение по умолчанию.
+Незнакомые ключи игнорируются. Некорректный `port` - остаётся значение
+по умолчанию.
 
 ### Где лежит файл
 
@@ -456,7 +695,7 @@ port = 8080
 |---|---|
 | Windows (exe) | Рядом с `TcgServer.exe` - `build\Debug\config.ini` |
 | Linux / macOS (бинарник) | Рядом с `TcgServer` или в текущей директории |
-| Docker | Volume `tcgserver_tcg-config` -> `/app/config/config.ini` |
+| Docker | Volume `tcgserver_tcg-config` → `/app/config/config.ini` |
 
 Подробнее про правку в Docker - см. раздел [Docker](#docker).
 
@@ -498,7 +737,7 @@ YYYY-MM-DD HH:MM:SS.mmm [LEVEL] [T:XXXX] [COMPONENT] [PEER] message
 
 ### Приоритет источников
 
-| Приоритет | Источник | Примененние |
+| Приоритет | Источник | Применение |
 |---|---|---|
 | 1 (высший) | Переменная окружения `TCG_LOG_LEVEL` | CI, Docker, быстрый override |
 | 2 | `config.ini` | Основной источник для разработки и прода |

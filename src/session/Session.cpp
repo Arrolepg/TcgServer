@@ -16,10 +16,14 @@ const char* opcodeName(Protocol::Opcode op) {
         case Protocol::Opcode::CreateRoom: return "CreateRoom";
         case Protocol::Opcode::JoinRoom: return "JoinRoom";
         case Protocol::Opcode::ListRooms: return "ListRooms";
+        case Protocol::Opcode::RequestStateSync: return "RequestStateSync";
+
         case Protocol::Opcode::Error: return "Error";
         case Protocol::Opcode::CreateRoomResponse: return "CreateRoomResponse";
         case Protocol::Opcode::JoinRoomResponse: return "JoinRoomResponse";
         case Protocol::Opcode::ListRoomsResponse: return "ListRoomsResponse";
+        case Protocol::Opcode::MatchStart: return "MatchStart";
+        case Protocol::Opcode::StateSync: return "StateSync";
     }
     return "Unknown";
 }
@@ -147,6 +151,7 @@ void Session::handleMessage(Protocol::Opcode opcode, const std::vector<char>& pa
         case Protocol::Opcode::CreateRoom: handleCreateRoom(r); break;
         case Protocol::Opcode::JoinRoom: handleJoinRoom(r); break;
         case Protocol::Opcode::ListRooms: handleListRooms(); break;
+        case Protocol::Opcode::RequestStateSync: handleRequestStateSync(); break;
 
         default: {
             logWarn("Unknown opcode received: " + opcodeStr(opcode));
@@ -254,6 +259,11 @@ void Session::handleJoinRoom(Protocol::Reader& r) {
             " payload=" + std::to_string(w.data().size()) + "B" +
             " total=" + std::to_string(pkt.size()) + "B");
     send(pkt);
+
+    if (room->playerCount() == 2) {
+        logInfo("Roon is full -> starting match: id = " + roomId);
+        room->initializeGame();
+    }
 }
 
 void Session::handleListRooms() {
@@ -281,6 +291,18 @@ void Session::handleListRooms() {
             " payload=" + std::to_string(w.data().size()) + "B" +
             " total=" + std::to_string(pkt.size()) + "B");
     send(pkt);
+}
+
+void Session::handleRequestStateSync() {
+    if (!currentRoom_) {
+        logWarn("RequestStateSync: not in a room");
+        Protocol::Writer w;
+        w.str("Not in a room");
+        send(Protocol::buildPacket(Protocol::Opcode::Error, w));
+        return;
+    }
+    logInfo("RequestStateSync: sending current snapshot");
+    currentRoom_->sendCurrentStateTo(shared_from_this());
 }
 
 void Session::onDisconnect() {

@@ -34,6 +34,7 @@ private:
     void handleCreateRoom(Protocol::Reader& r);
     void handleJoinRoom(Protocol::Reader& r);
     void handleListRooms();
+    void handleRequestStateSync();
 
     void onDisconnect();
 
