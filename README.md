@@ -3,7 +3,7 @@
 Сервер для карточной игры (TCG) на C++17 с использованием Boost.Asio.
 Принимает TCP-подключения, позволяет создавать игровые комнаты, присоединяться
 к ним и получать список доступных комнат. При заполнении комнаты (2/2)
-сервер инициализирует матч и пушит клиентам полное состояние игры.
+сервер инициализирует матч и отправляет клиентам полное состояние игры.
 
 Протокол - бинарный, с length-prefixed фреймингом. Общение идёт байтами
 с явными типами и длинами, без `\0`-терминаторов и текстовых разделителей.
@@ -563,24 +563,24 @@ u16 ext_count
 Полный flow от подключения до старта матча:
 
 ```
-client A              server                   client B
-  |                     |                         |
-  |-- TCP connect ----->|                         |
-  |                     |<------ TCP connect -----|
-  |                     |                         |
-  |-- CreateRoom("A") ->|                         |
-  |<-- CreateRoomResp(roomId) ------------------|
-  |                     |                         |
-  |                     |<-- JoinRoom(roomId,"B")-|
-  |                     |--- JoinRoomResp(roomId)->|
-  |                     |                         |
-  |                     | (players.size() == 2)   |
-  |                     | initializeGame()        |
-  |                     |                         |
-  |<-- MatchStart (0x90)|--- MatchStart (0x90) -->|
-  |<-- StateSync seq=1 -|--- StateSync seq=1 ---->|
-  |                     |                         |
-  | (UI готов)          |                         | (UI готов)
+client A                        server                    client B
+  |                               |                          |
+  |-- TCP connect --------------->|                          |
+  |                               |<------ TCP connect ------|
+  |                               |                          |
+  |-- CreateRoom("A") ----------->|                          |
+  |<-- CreateRoomResp(roomId) ----|                          |
+  |                               |                          |
+  |                               |<-- JoinRoom(roomId,"B")- |
+  |                               |--- JoinRoomResp(roomId)->|
+  |                               |                          |
+  |                               | (players.size() == 2)    |
+  |                               | initializeGame()         |
+  |                               |                          |
+  |<-- MatchStart (0x90)----------|--- MatchStart (0x90) --->|
+  |<-- StateSync seq=1 -----------|--- StateSync seq=1 ----->|
+  |                               |                          |
+  | (UI готов)                    |                          | (UI готов)
 ```
 
 Ключевое:
