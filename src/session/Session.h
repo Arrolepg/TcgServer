@@ -25,6 +25,7 @@ public:
 
     const std::string& getName() const { return playerName_; }
     void setName(const std::string& name) { playerName_ = name; }
+    void close();
 
 private:
     void read();
@@ -34,7 +35,6 @@ private:
     void handleCreateRoom(Protocol::Reader& r);
     void handleJoinRoom(Protocol::Reader& r);
     void handleListRooms();
-    void handleRequestStateSync();
 
     void onDisconnect();
 

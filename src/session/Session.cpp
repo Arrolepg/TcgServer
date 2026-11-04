@@ -16,7 +16,6 @@ const char* opcodeName(Protocol::Opcode op) {
         case Protocol::Opcode::CreateRoom: return "CreateRoom";
         case Protocol::Opcode::JoinRoom: return "JoinRoom";
         case Protocol::Opcode::ListRooms: return "ListRooms";
-        case Protocol::Opcode::RequestStateSync: return "RequestStateSync";
 
         case Protocol::Opcode::Error: return "Error";
         case Protocol::Opcode::CreateRoomResponse: return "CreateRoomResponse";
@@ -144,6 +143,16 @@ void Session::send(const std::vector<char>& data) {
     }
 }
 
+void Session::close() {
+    boost::system::error_code ec;
+    socket_.close(ec);
+    if (ec && ec != boost::asio::error::bad_descriptor) {
+        logWarn("Socket close: " + ec.message());
+    } else {
+        logInfo("Socker closed explicitly");
+    }
+}
+
 void Session::handleMessage(Protocol::Opcode opcode, const std::vector<char>& payload) {
     Protocol::Reader r(payload.data(), payload.size());
 
@@ -151,7 +160,6 @@ void Session::handleMessage(Protocol::Opcode opcode, const std::vector<char>& pa
         case Protocol::Opcode::CreateRoom: handleCreateRoom(r); break;
         case Protocol::Opcode::JoinRoom: handleJoinRoom(r); break;
         case Protocol::Opcode::ListRooms: handleListRooms(); break;
-        case Protocol::Opcode::RequestStateSync: handleRequestStateSync(); break;
 
         default: {
             logWarn("Unknown opcode received: " + opcodeStr(opcode));
@@ -293,32 +301,34 @@ void Session::handleListRooms() {
     send(pkt);
 }
 
-void Session::handleRequestStateSync() {
-    if (!currentRoom_) {
-        logWarn("RequestStateSync: not in a room");
-        Protocol::Writer w;
-        w.str("Not in a room");
-        send(Protocol::buildPacket(Protocol::Opcode::Error, w));
-        return;
-    }
-    logInfo("RequestStateSync: sending current snapshot");
-    currentRoom_->sendCurrentStateTo(shared_from_this());
-}
-
 void Session::onDisconnect() {
     if (!currentRoom_) return;
 
-    const std::string roomId = currentRoom_->getId();
-    currentRoom_->removePlayer(shared_from_this());
-
-    logInfo("Player removed from room: id=" + roomId +
-            " name=" + playerName_ +
-            " remaining=" + std::to_string(currentRoom_->playerCount()));
-
-    if (currentRoom_->isEmpty()) {
-        rooms_.erase(roomId);
-        logInfo("Room deleted (empty): id=" + roomId +
-                " total rooms=" + std::to_string(rooms_.size()));
-    }
+    auto room = currentRoom_;
+    const std::string roomId = room->getId();
     currentRoom_.reset();
+
+    std::shared_ptr<Session> other;
+    for (const auto& p : room->getPlayers()) {
+        if (p.get() != this) {
+            other = p;
+            break;
+        }
+    }
+
+    room->removePlayer(shared_from_this());
+
+    rooms_.erase(roomId);
+
+    logInfo("Room closed: id = " + roomId + " (player left, remaining = " +
+        std::to_string(room->playerCount()) + ")");
+
+    if (other) {
+        Protocol::Writer w;
+        w.str("Opponent disconnected");
+        auto pkt = Protocol::buildPacket(Protocol::Opcode::Error, w);
+        other->send(pkt);
+        other->close();
+        logInfo("Remaining player notified and disconnected");
+    }
 }
