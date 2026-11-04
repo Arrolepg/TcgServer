@@ -6,39 +6,65 @@
 #include "session/Session.h"
 #include "protocol/Protocol.h"
 #include "PlayerState.h"
+#include "card/CardRegistry.h"
 #include "logger/Logger.h"
 
 namespace {
-    const std::vector<std::string> kCardPool = {
-        "Fireball",
-        "Arcane",
-        "Frostbind",
-        "BladeRush",
-        "CrushingBlow",
-        "PiercingShot",
-        "IronWall",
-        "CounterStance",
-        "BarrierCharm"
-    };
-
-    struct AttrInt {
+    struct AttrDef {
         const char* row;
-        int32_t max;
+        const char* shortName;
+        PlayerAttr idx;
     };
 
-    const AttrInt kAttrDefaults[] = {
-        {"health", 15},
-        {"mana", 10},
-        {"defence", 10}
+    const AttrDef kAttrs[] = {
+        {"health", "hp", Attr_Health},
+        {"mana", "mana", Attr_Mana},
+        {"defence", "def", Attr_Defense},
     };
 
     constexpr int32_t kInitialHandSize = 5;
     constexpr int32_t kDeckSize = 20;
 
-    void shuffleDeck(std::vector<std::string>& deck) {
+    template<typename T>
+    void shuffleDeck(std::vector<T>& deck) {
         static  std::random_device rd;
         static std::mt19937 gen(rd());
         std::shuffle(deck.begin(), deck.end(), gen);
+    }
+
+    void writeAttrs(Protocol::Writer& w, const PlayerState& p) {
+        w.u16(std::size(kAttrs));
+        for (const auto& a : kAttrs) {
+            w.str(a.row);
+            w.u32(static_cast<uint32_t>(p.attributes[a.idx].max));
+            w.u32(static_cast<uint32_t>(p.attributes[a.idx].current));
+        }
+    }
+
+    std::string formatAttrs(const PlayerState& p) {
+        std::string out;
+        for (const auto& a : kAttrs) {
+            if (!out.empty()) out += ' ';
+            out += a.shortName;
+            out += '=';
+            out += std::to_string(p.attributes[a.idx].current);
+            out += '/';
+            out += std::to_string(p.attributes[a.idx].max);
+        }
+        return out;
+    }
+
+    void writeHand(Protocol::Writer& w, const PlayerState& p) {
+        w.u16(static_cast<uint16_t>(p.hand.size()));
+        for (uint16_t id : p.hand) w.u16(id);
+    }
+    void writeDeck(Protocol::Writer& w, const PlayerState& p) {
+        w.u16(static_cast<uint16_t>(p.deck.size()));
+        for (uint16_t id : p.deck) w.u16(id);
+    }
+    void writeDiscard(Protocol::Writer& w, const PlayerState& p) {
+        w.u16(static_cast<uint16_t>(p.discard.size()));
+        for (uint16_t id : p.discard) w.u16(id);
     }
 }
 
@@ -88,52 +114,29 @@ void Room::initializeGame() {
                  " guest=" + guestSession_->getName());
 
     auto buildDeck = []() {
-        std::vector<std::string> deck;
+        std::vector<uint16_t> deck;
         deck.reserve(kDeckSize);
+        const auto& pool = CardRegistry::allIds();
         for (int i = 0; i < kDeckSize; ++i) {
-            deck.push_back(kCardPool[i % kCardPool.size()]);
+            deck.push_back(pool[i % pool.size()]);
         }
         shuffleDeck(deck);
         return deck;
     };
 
-    PlayerState p1, p2;
+    hostState_ = PlayerState{};
+    guestState_ = PlayerState{};
+
+    PlayerState& p1 = hostState_;
+    PlayerState& p2 = guestState_;
 
     p1.playerId = "P1";
     p1.playerName = hostSession_->getName();
     p1.deck = buildDeck();
-    for (auto& a : kAttrDefaults) {
-        if (a.row == std::string("health")) {
-            p1.healthMax = a.max;
-            p1.healthCurrent = a.max;
-        }
-        if (a.row == std::string("mana")) {
-            p1.manaMax = a.max;
-            p1.manaCurrent = a.max;
-        }
-        if (a.row == std::string("defence")) {
-            p1.defenseMax = a.max;
-            p1.defenseCurrent = a.max;
-        }
-    }
 
     p2.playerId = "P2";
     p2.playerName = guestSession_->getName();
     p2.deck = buildDeck();
-    for (auto& a : kAttrDefaults) {
-        if (a.row == std::string("health")) {
-            p2.healthMax = a.max;
-            p2.healthCurrent = a.max;
-        }
-        if (a.row == std::string("mana")) {
-            p2.manaMax = a.max;
-            p2.manaCurrent = a.max;
-        }
-        if (a.row == std::string("defence")) {
-            p2.defenseMax = a.max;
-            p2.defenseCurrent = a.max;
-        }
-    }
 
     Logger::debug("ROOM:" + id_,
                   "Decks built: P1=" + std::to_string(p1.deck.size()) +
@@ -157,105 +160,144 @@ void Room::initializeGame() {
     static std::mt19937 gen(rd());
     std::uniform_int_distribution<int> dice(1, 6);
     int d1 = dice(gen), d2 = dice(gen);
-    const std::string first = (d1 >= d2) ? p1.playerId : p2.playerId;
-    const int diceRoll = std::max(d1, d2);
+
+    firstPlayerId_ = (d1 >= d2) ? p1.playerId : p2.playerId;
+    currentTurnPlayerId_ = firstPlayerId_;
+    diceRoll_ = static_cast<uint8_t>(std::max(d1, d2));
+    turnNumber_ = 1;
+    gamePhase_ = Protocol::GamePhase::Playing;
+    winnerId_.clear();
+    stateSeq_ = 0;
+    hasMatchState_ = true;
 
     Logger::info("ROOM:" + id_,
                  "Dice roll: P1=" + std::to_string(d1) +
                  " P2=" + std::to_string(d2) +
-                 " -> first=" + first +
-                 " (dice=" + std::to_string(diceRoll) + ")");
+                 " -> first=" + firstPlayerId_ +
+                 " (dice=" + std::to_string(diceRoll_) + ")");
 
     Logger::info("ROOM:" + id_,
-                 "P1 name=" + p1.playerName +
-                 " hp=" + std::to_string(p1.healthCurrent) + "/" + std::to_string(p1.healthMax) +
-                 " mana=" + std::to_string(p1.manaCurrent) + "/" + std::to_string(p1.manaMax) +
-                 " def=" + std::to_string(p1.defenseCurrent) + "/" + std::to_string(p1.defenseMax));
+                 "P1 name=" + p1.playerName + " " + formatAttrs(p1));
     Logger::info("ROOM:" + id_,
-                 "P2 name=" + p2.playerName +
-                 " hp=" + std::to_string(p2.healthCurrent) + "/" + std::to_string(p2.healthMax) +
-                 " mana=" + std::to_string(p2.manaCurrent) + "/" + std::to_string(p2.manaMax) +
-                 " def=" + std::to_string(p2.defenseCurrent) + "/" + std::to_string(p2.defenseMax));
+                 "P2 name=" + p2.playerName + " " + formatAttrs(p2));
 
-    auto buildMatchStartPayload = [&](const PlayerState& me, const PlayerState& opp) -> std::vector<char> {
-            Protocol::Writer w;
-            w.str(id_);
-            w.str(me.playerId);
-            w.str(me.playerName);
-
-            w.u16(std::size(kAttrDefaults));
-            for (auto& a : kAttrDefaults) {
-                w.str(a.row);
-                int maxV = 0, curV = 0;
-                std::string r = a.row;
-                if (r == "health") {
-                    maxV = me.healthMax;
-                    curV = me.healthCurrent;
-                }
-                if (r == "mana") {
-                    maxV = me.manaMax;
-                    curV = me.manaCurrent;
-                }
-                if (r == "defence") {
-                    maxV = me.defenseMax;
-                    curV = me.defenseCurrent;
-                }
-                w.u32(static_cast<uint32_t>(maxV));
-                w.u32(static_cast<uint32_t>(curV));
-            }
-
-            w.u16(static_cast<uint16_t>(me.hand.size()));
-            for (auto& c : me.hand) w.str(c);
-
-            w.u16(static_cast<uint16_t>(me.deck.size()));
-            for (auto& c : me.deck) w.str(c);
-
-            w.str(opp.playerId);
-            w.str(opp.playerName);
-
-            w.u16(std::size(kAttrDefaults));
-            for (auto& a : kAttrDefaults) {
-                w.str(a.row);
-                int maxV = 0, curV = 0;
-                std::string r = a.row;
-                if (r == "health") {
-                    maxV = opp.healthMax;
-                    curV = opp.healthCurrent;
-                }
-                if (r == "mana") {
-                    maxV = opp.manaMax;
-                    curV = opp.manaCurrent;
-                }
-                if (r == "defence") {
-                    maxV = opp.defenseMax;
-                    curV = opp.defenseCurrent;
-                }
-                w.u32(static_cast<uint32_t>(maxV));
-                w.u32(static_cast<uint32_t>(curV));
-            }
-
-            w.u16(static_cast<uint16_t>(opp.hand.size()));
-
-            w.str(first);
-            w.u8(static_cast<uint8_t>(diceRoll));
-
-            return w.data();
-        };
-
-    auto sendMatchStart = [&](std::shared_ptr<Session> who, const PlayerState& me, const PlayerState& opp) {
+    auto sendMatchStart = [&](std::shared_ptr<Session> who,
+                              const PlayerState& me, const PlayerState& opp) {
         auto payload = buildMatchStartPayload(me, opp);
         auto pkt = Protocol::buildPacket(Protocol::Opcode::MatchStart, payload);
-
         Logger::info("ROOM:" + id_,
                      ">> MatchStart to " + me.playerId + " (" + me.playerName + ")" +
                      " payload=" + std::to_string(payload.size()) + "B" +
                      " total=" + std::to_string(pkt.size()) + "B");
-
         who->send(pkt);
     };
-
     sendMatchStart(hostSession_, p1, p2);
     sendMatchStart(guestSession_, p2, p1);
 
+    broadcastStateSync();
+
     Logger::info("ROOM:" + id_, "Match start complete");
+}
+
+std::vector<char> Room::buildMatchStartPayload(const PlayerState& me, const PlayerState& opp) const {
+    Protocol::Writer w;
+    w.u32(Protocol::kWireVersion);
+    w.u32(CardRegistry::version());
+
+    w.str(id_);
+    w.str(me.playerId);
+    w.str(me.playerName);
+    writeAttrs(w, me);
+    writeHand (w, me);
+    writeDeck (w, me);
+    w.u16(static_cast<uint16_t>(me.hand.size() + me.discard.size()));
+
+    w.str(opp.playerId);
+    w.str(opp.playerName);
+    writeAttrs(w, opp);
+    w.u16(static_cast<uint16_t>(opp.hand.size()));
+    w.u16(static_cast<uint16_t>(opp.hand.size() + opp.discard.size()));
+
+    w.str(firstPlayerId_);
+    w.u8(diceRoll_);
+
+    return w.data();
+}
+
+std::vector<char> Room::buildStateSyncPayload(const PlayerState& me, const PlayerState& opp) const {
+    Protocol::Writer w;
+    w.u32(Protocol::kWireVersion);
+    w.u32(CardRegistry::version());
+    w.u32(stateSeq_);
+
+    w.str(id_);
+    w.u8(static_cast<uint8_t>(gamePhase_));
+    w.u8(turnNumber_);
+    w.str(currentTurnPlayerId_);
+    w.u8(diceRoll_);
+    w.str(winnerId_);
+
+    w.str(me.playerId);
+    w.str(me.playerName);
+    writeAttrs(w, me);
+    writeHand(w, me);
+    writeDeck(w, me);
+    writeDiscard(w, me);
+    w.u16(static_cast<uint16_t>(me.hand.size() + me.discard.size()));
+
+    w.str(opp.playerId);
+    w.str(opp.playerName);
+    writeAttrs(w, opp);
+    w.u16(static_cast<uint16_t>(opp.hand.size()));
+    w.u16(static_cast<uint16_t>(opp.deck.size()));
+    writeDiscard(w, opp);
+    w.u16(static_cast<uint16_t>(opp.hand.size() + opp.discard.size()));
+
+    // change into next step
+    w.u16(0);
+
+    return w.data();
+}
+
+void Room::broadcastStateSync() {
+    if (!hasMatchState_ || !hostSession_ || !guestSession_) return;
+
+    ++stateSeq_;
+
+    auto pushTo = [&](std::shared_ptr<Session> who, const PlayerState& me, const PlayerState& opp) {
+        auto payload = buildStateSyncPayload(me, opp);
+        auto pkt = Protocol::buildPacket(Protocol::Opcode::StateSync, payload);
+        Logger::info("ROOM:" + id_,
+                     ">> StateSync seq=" + std::to_string(stateSeq_) +
+                     " to " + me.playerId +
+                     " payload=" + std::to_string(payload.size()) + "B");
+        who->send(pkt);
+    };
+
+    pushTo(hostSession_,  hostState_,  guestState_);
+    pushTo(guestSession_, guestState_, hostState_);
+}
+
+void Room::sendCurrentStateTo(const std::shared_ptr<Session>& to) {
+    if (!hasMatchState_) return;
+
+    const PlayerState* you = nullptr;
+    const PlayerState* opp = nullptr;
+    if (to == hostSession_) {
+        you = &hostState_;
+        opp = &guestState_;
+    }
+    else if (to == guestSession_) {
+        you = &guestState_;
+        opp = &hostState_;
+    }
+    else return;
+
+    auto payload = buildStateSyncPayload(*you, *opp);
+    auto pkt = Protocol::buildPacket(Protocol::Opcode::StateSync, payload);
+    Logger::info("ROOM:" + id_,
+                 ">> StateSync (on-demand) seq=" + std::to_string(stateSeq_) +
+                 " to " + you->playerId +
+                 " payload=" + std::to_string(payload.size()) + "B");
+    to->send(pkt);
 }

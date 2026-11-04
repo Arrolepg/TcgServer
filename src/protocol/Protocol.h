@@ -5,10 +5,19 @@
 
 class Protocol {
 public:
+    static constexpr uint32_t kWireVersion = 2;
+
+    enum class GamePhase : uint8_t {
+        Init = 0,
+        Playing = 1,
+        Finished = 2,
+    };
+
     enum class Opcode : uint8_t {
         CreateRoom = 0x01,
         JoinRoom = 0x02,
         ListRooms = 0x03,
+        RequestStateSync = 0x04,
 
         Error = 0x80,
         CreateRoomResponse = 0x81,
@@ -16,6 +25,7 @@ public:
         ListRoomsResponse = 0x83,
 
         MatchStart = 0x90,
+        StateSync = 0x91,
     };
 
     static constexpr std::size_t kHeaderSize = 3;
@@ -45,7 +55,7 @@ public:
         uint32_t u32();
         std::string str();
 
-        bool ok()    const { return ok_; }
+        bool ok() const { return ok_; }
         bool empty() const { return pos_ >= size_; }
 
     private:
