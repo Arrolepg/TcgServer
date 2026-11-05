@@ -14,6 +14,7 @@ public:
 private:
     void accept();
 
+    boost::asio::io_context& io_;
     boost::asio::ip::tcp::acceptor acceptor_;
     std::map<std::string, std::shared_ptr<Room>> rooms_;
 };

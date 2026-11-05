@@ -6,7 +6,7 @@
 using boost::asio::ip::tcp;
 
 Server::Server(boost::asio::io_context& io, short port)
-    : acceptor_(io, tcp::endpoint(tcp::v4(), port)) {
+    : io_(io), acceptor_(io, tcp::endpoint(tcp::v4(), port)) {
     Logger::info("SERVER", "Listening on 0.0.0.0:" + std::to_string(port));
     accept();
 }
@@ -15,7 +15,7 @@ void Server::accept() {
     acceptor_.async_accept(
         [this](boost::system::error_code ec, tcp::socket socket) {
             if (!ec) {
-                auto session = std::make_shared<Session>(std::move(socket), rooms_);
+                auto session = std::make_shared<Session>(io_, std::move(socket), rooms_);
                 session->start();
             } else {
                 Logger::error("SERVER", "Accept failed: " + ec.message() +

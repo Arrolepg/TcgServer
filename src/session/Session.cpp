@@ -16,6 +16,7 @@ const char* opcodeName(Protocol::Opcode op) {
         case Protocol::Opcode::CreateRoom: return "CreateRoom";
         case Protocol::Opcode::JoinRoom: return "JoinRoom";
         case Protocol::Opcode::ListRooms: return "ListRooms";
+        case Protocol::Opcode::EndTurn: return "EndTurn";
 
         case Protocol::Opcode::Error: return "Error";
         case Protocol::Opcode::CreateRoomResponse: return "CreateRoomResponse";
@@ -33,11 +34,10 @@ std::string opcodeStr(Protocol::Opcode op) {
                   static_cast<unsigned>(op), opcodeName(op));
     return buf;
 }
-
 }
 
-Session::Session(tcp::socket socket, RoomMap& rooms)
-    : id_(s_nextId.fetch_add(1, std::memory_order_relaxed)),
+Session::Session(boost::asio::io_context& io, tcp::socket socket, RoomMap& rooms)
+    : io_(io), id_(s_nextId.fetch_add(1, std::memory_order_relaxed)),
       socket_(std::move(socket)),
       rooms_(rooms) {}
 
@@ -160,6 +160,7 @@ void Session::handleMessage(Protocol::Opcode opcode, const std::vector<char>& pa
         case Protocol::Opcode::CreateRoom: handleCreateRoom(r); break;
         case Protocol::Opcode::JoinRoom: handleJoinRoom(r); break;
         case Protocol::Opcode::ListRooms: handleListRooms(); break;
+        case Protocol::Opcode::EndTurn: handleEndTurn(); break;
 
         default: {
             logWarn("Unknown opcode received: " + opcodeStr(opcode));
@@ -192,7 +193,7 @@ void Session::handleCreateRoom(Protocol::Reader& r) {
     const std::string roomId = Utils::generateRoomId();
     const std::string clientIp = socket_.remote_endpoint().address().to_string();
 
-    auto room = std::make_shared<Room>(roomId, clientIp);
+    auto room = std::make_shared<Room>(io_, roomId, clientIp);
     room->addPlayer(shared_from_this());
     rooms_[roomId] = room;
     setRoom(room);
@@ -299,6 +300,15 @@ void Session::handleListRooms() {
             " payload=" + std::to_string(w.data().size()) + "B" +
             " total=" + std::to_string(pkt.size()) + "B");
     send(pkt);
+}
+
+void Session::handleEndTurn() {
+    if (!currentRoom_) {
+        logWarn("EndTurn: player not in a room");
+        return;
+    }
+    logInfo("EndTurn requested");
+    currentRoom_->handleEndTurn(shared_from_this());
 }
 
 void Session::onDisconnect() {
