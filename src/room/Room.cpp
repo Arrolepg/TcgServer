@@ -68,8 +68,8 @@ namespace {
     }
 }
 
-Room::Room(const std::string& id, const std::string& hostIp)
-    : id_(id), hostIp_(hostIp), gameStarted_(false) {}
+Room::Room(boost::asio::io_context& io, const std::string& id, const std::string& hostIp)
+    : id_(id), hostIp_(hostIp), gameStarted_(false), turnTimer_(io) {}
 
 void Room::addPlayer(const std::shared_ptr<Session>& player) {
     if (!hostSession_) {
@@ -87,6 +87,9 @@ void Room::removePlayer(const std::shared_ptr<Session>& player) {
     }
     if (player == guestSession_) {
         guestSession_.reset();
+    }
+    if (players_.empty()) {
+        stopTurnTimer();
     }
 }
 
@@ -181,6 +184,8 @@ void Room::initializeGame() {
     Logger::info("ROOM:" + id_,
                  "P2 name=" + p2.playerName + " " + formatAttrs(p2));
 
+    currentTurnTime_ = turnTimeLimit_;
+
     auto sendMatchStart = [&](std::shared_ptr<Session> who,
                               const PlayerState& me, const PlayerState& opp) {
         auto payload = buildMatchStartPayload(me, opp);
@@ -193,6 +198,8 @@ void Room::initializeGame() {
     };
     sendMatchStart(hostSession_, p1, p2);
     sendMatchStart(guestSession_, p2, p1);
+
+    startTurnTimer();
 
     Logger::info("ROOM:" + id_, "Match start complete");
 }
@@ -219,6 +226,9 @@ std::vector<char> Room::buildMatchStartPayload(const PlayerState& me, const Play
     w.str(firstPlayerId_);
     w.u8(diceRoll_);
 
+    w.u8(static_cast<uint8_t>(currentTurnTime_));
+    w.u8(static_cast<uint8_t>(turnTimeLimit_));
+
     return w.data();
 }
 
@@ -234,6 +244,9 @@ std::vector<char> Room::buildStateSyncPayload(const PlayerState& me, const Playe
     w.str(currentTurnPlayerId_);
     w.u8(diceRoll_);
     w.str(winnerId_);
+
+    w.u8(static_cast<uint8_t>(currentTurnTime_));
+    w.u8(static_cast<uint8_t>(turnTimeLimit_));
 
     w.str(me.playerId);
     w.str(me.playerName);
@@ -274,4 +287,77 @@ void Room::broadcastStateSync() {
 
     pushTo(hostSession_,  hostState_,  guestState_);
     pushTo(guestSession_, guestState_, hostState_);
+}
+
+void Room::startTurnTimer() {
+    if (turnActive_) return;
+    turnActive_ = true;
+    scheduleNextTick();
+}
+
+void Room::scheduleNextTick() {
+    std::weak_ptr<Room> weak = shared_from_this();
+    turnTimer_.expires_after(std::chrono::seconds(1));
+    turnTimer_.async_wait([weak](const boost::system::error_code& ec) {
+        if (auto self = weak.lock()) {
+            self->onTurnTick(ec);
+        }
+    });
+}
+
+void Room::onTurnTick(const boost::system::error_code& ec) {
+    if (ec == boost::asio::error::operation_aborted) return;
+    if (ec) return;
+    if (!turnActive_) return;
+    if (!hasMatchState_ || gamePhase_ != Protocol::GamePhase::Playing) {
+        stopTurnTimer();
+        return;
+    }
+    if (currentTurnTime_ > 0) --currentTurnTime_;
+    if (currentTurnTime_ == 0) {
+        endTurn();
+    } else {
+        broadcastStateSync();
+    }
+
+    scheduleNextTick();
+}
+
+void Room::stopTurnTimer() {
+    turnActive_ = false;
+    try {
+        turnTimer_.cancel();
+    } catch (const boost::system::system_error& ) {
+
+    }
+}
+
+void Room::endTurn() {
+    if (!hasMatchState_) return;
+    if (gamePhase_ != Protocol::GamePhase::Playing) return;
+
+    currentTurnPlayerId_ = (currentTurnPlayerId_ == "P1") ? "P2" : "P1";
+    ++turnNumber_;
+    currentTurnTime_ = turnTimeLimit_;
+
+    Logger::info("ROOM:" + id_,
+        "Turn -> " + currentTurnPlayerId_ + " (turn #" + std::to_string(turnNumber_) + ")");
+
+    broadcastStateSync();
+}
+
+void Room::handleEndTurn(const std::shared_ptr<Session> &caller) {
+    if (!hasMatchState_ || gamePhase_ != Protocol::GamePhase::Playing) return;
+
+    std::string callerId;
+    if (caller == hostSession_) callerId = "P1";
+    else if (caller == guestSession_) callerId = "P2";
+    else return;
+
+    if (callerId != currentTurnPlayerId_) {
+        Logger::debug("ROOM:" + id_,
+            "EndTurn ignored: caller = " + callerId + " current = " + currentTurnPlayerId_);
+        return;
+    }
+    endTurn();
 }

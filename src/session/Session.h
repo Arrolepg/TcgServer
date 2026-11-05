@@ -15,7 +15,7 @@ class Session : public std::enable_shared_from_this<Session> {
 public:
     using RoomMap = std::map<std::string, std::shared_ptr<Room>>;
 
-    Session(boost::asio::ip::tcp::socket socket, RoomMap& rooms);
+    Session(boost::asio::io_context& io, boost::asio::ip::tcp::socket socket, RoomMap& rooms);
 
     void start();
     void send(const std::vector<char>& data);
@@ -35,6 +35,7 @@ private:
     void handleCreateRoom(Protocol::Reader& r);
     void handleJoinRoom(Protocol::Reader& r);
     void handleListRooms();
+    void handleEndTurn();
 
     void onDisconnect();
 
@@ -45,6 +46,8 @@ private:
     void logWarn(const std::string& m) const;
     void logError(const std::string& m) const;
     void logTrace(const std::string& m) const;
+
+    boost::asio::io_context& io_;
 
     static std::atomic<std::uint32_t> s_nextId;
     const std::uint32_t id_;

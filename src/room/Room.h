@@ -3,15 +3,19 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/steady_timer.hpp>
 
 #include "PlayerState.h"
 #include "protocol/Protocol.h"
 
 class Session;
 
-class Room {
+class Room : public std::enable_shared_from_this<Room> {
 public:
-    Room(const std::string& id, const std::string& hostIp);
+    Room(boost::asio::io_context& io,
+        const std::string& id,
+        const std::string& hostIp);
 
     const std::string& getId() const {
         return id_;
@@ -37,9 +41,17 @@ public:
 
     void broadcastStateSync();
 
+    void handleEndTurn(const std::shared_ptr<Session>& caller);
+    void stopTurnTimer();
+
 private:
     std::vector<char> buildMatchStartPayload(const PlayerState& me, const PlayerState& opp) const;
     std::vector<char> buildStateSyncPayload(const PlayerState& me, const PlayerState& opp) const;
+
+    void endTurn();
+    void startTurnTimer();
+    void scheduleNextTick();
+    void onTurnTick(const boost::system::error_code& ec);
 
     std::string id_;
     std::string hostIp_;
@@ -60,4 +72,9 @@ private:
     std::string firstPlayerId_;
     std::string currentTurnPlayerId_;
     std::string winnerId_;
+
+    boost::asio::steady_timer turnTimer_;
+    int currentTurnTime_ = 30;
+    int turnTimeLimit_ = 30;
+    bool turnActive_ = false;
 };

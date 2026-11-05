@@ -3,7 +3,9 @@
 Сервер для карточной игры (TCG) на C++17 с использованием Boost.Asio.
 Принимает TCP-подключения, позволяет создавать игровые комнаты, присоединяться
 к ним и получать список доступных комнат. При заполнении комнаты (2/2)
-сервер инициализирует матч и отправляет клиентам полное состояние игры.
+сервер инициализирует матч, отправляет клиентам полное состояние игры и запускает 
+таймер хода. Ход можно завершить вручную или по истечении таймера - сервер самостоятельно
+перключит игрока.
 
 Протокол - бинарный, с length-prefixed фреймингом. Общение идёт байтами
 с явными типами и длинами, без `\0`-терминаторов и текстовых разделителей.
@@ -15,16 +17,44 @@
 - [Возможности](#возможности)
 - [Требования](#требования)
 - [Установка зависимостей](#установка-зависимостей)
+   - [Windows](#windows)
+   - [Linux](#linux)
+   - [MacOs](#macos)
 - [Сборка проекта](#сборка-проекта)
+    - [Windows](#windows-1)
+    - [Linux](#linux-1)
+    - [MacOs](#macos-1)
 - [Запуск](#запуск)
+    - [Смена порта](#смена-порта)
 - [Docker](#docker)
+    - [Требования](#требования-1)
+    - [Запуск](#запуск-1)
+    - [Просмотр логов](#просмотр-логов)
+    - [Проверка статуса](#проверка-статуса)
+    - [Остановка и запуск](#остановка-и-запуск)
+    - [Пересборка после правок кода](#пересборка-после-правок-кода)
+    - [Изменение конфигурации в работающем контейнере](#изменение-конфигурации-в-работающем-контейнере)
+    - [Что внутри образа](#что-внутри-образа)
+- [Краткое описание модулей](#краткое-описание-модулей)
 - [Сетевой протокол](#сетевой-протокол)
    - [Версия wire-формата](#версия-wire-формата)
+   - [Формат пакета](#формат-пакета)
+   - [Кодировка полей](#кодирование-полей)
    - [Идентификация карт](#идентификация-карт)
+   - [Опкоды клиента](#опкоды-клиента)
+   - [Опкоды сервера](#опкоды-сервера)
    - [Старт матча](#старт-матча)
    - [Синхронизация состояний](#синхронизация-состояний)
+   - [Управление ходом](#управление-ходом)
    - [Инициализация матча](#инициализация-матча)
+   - [Пример обмена](#примеры-обмена)
+   - [Примеры формата пакетов сервера при MatchStart, StateSync, EndTurn](#примеры-формата-пакетов-сервера-при-matchstart-statesync-endturn)
+   - [Почему бинарный формат](#почему-бинарный-формат)
 - [Конфигурация](#конфигурация)
+   - [Расположение файла](#расположение-файла)
+   - [Уровни логирования](#уровни-логирования)
+   - [Приоритет источников](#приоритет-источников)
+   - [Проверка зашруженной конфигурации](#проверка-загруженной-конфигурации)
 
 ---
 
@@ -38,6 +68,12 @@
 - Инициализация матча при заполнении комнаты (2/2): раздача карт, атрибуты,
   бросок кубика для определения первого хода, снимок руки и колоды.
 - Старт матча - один раз на игрока после заполнения комнаты.
+- Серверный таймер хода: `30 с` на игрока, тик `1 с`. Каждый тик сервер
+рассылает `StateSync` с актуальным `current_turn_time`. По достижении `0`
+ход автоматически переходит к другому игроку, таймер сбрасывается на `30`.
+- Клиентский ход: игрок может завершить свой ход
+  досрочно. Сервер валидирует, что вызвал именно текущий игрок - иначе
+  игнорирует.
 - Синхронизация - полный snapshot состояния.
 - Хранение состояния игроков в `Room` между отправками: `hand` / `deck` /
   `discard` / `attributes` не пересоздаются на каждый пакет.
@@ -51,7 +87,8 @@
   миллисекундами, ID сессии, IP клиента и hex-дампами.
 - Конфигурация через `config.ini` (уровень логов, порт).
 - Кроссплатформенный код (Windows / Linux / macOS).
-- Готов к запуску в Docker (multi-stage build, distroless runtime).
+- Готов к запуску в Docker (многостадийная сборка (multi-stage build), 
+финальный образ без дистрибутива (distroless runtime)).
 
 ---
 
@@ -75,7 +112,7 @@
 
 ## Установка зависимостей
 
-### Windows + vcpkg (рекомендуется)
+### Windows
 
 1. **Установите Visual Studio 2022** с компонентом «Разработка классических
    приложений на C++». Скачать: <https://visualstudio.microsoft.com/>
@@ -127,7 +164,7 @@ brew install cmake boost
 
 ## Сборка проекта
 
-### Windows (PowerShell)
+### Windows
 
 1. **Клонируйте репозиторий:**
 
@@ -214,36 +251,6 @@ cmake --build . --parallel
 
 ---
 
-### Краткое описание модулей
-
-- **Server** - асинхронно принимает TCP-подключения, создаёт `Session`
-  на каждого клиента.
-- **Session** - обрабатывает входящие пакеты, хранит состояние игрока
-  (имя, комнату), ведёт аккумулятор входящих байт и парсит пакеты
-  по length-prefix.
-- **PlayerState** - снимок состояния одного игрока в комнате:
-  `playerId` / `playerName`; `attributes` (массив `AttrValue` - max/current
-  для `health` / `mana` / `defence`); `hand` / `deck` / `discard` как
-  `std::vector<uint16_t>` (CardRegistry ids). Дефолты атрибутов
-  (15 / 10 / 10) задаются в конструкторе `PlayerState::PlayerState()`.
-- **Room** - модель игровой комнаты. Хранит игроков, IP хоста и **полное
-  состояние матча** (`hostState_` / `guestState_`): hand, deck, discard,
-  attributes, game phase, turn, winner. 
-При отключении любого игрока комната закрывается целиком (
-оставшийся игрок получает `Error("Opponent disconnected")` и его
-сессия принудительно закрывается).
-- **CardRegistry** - таблица `{u16 id, string rowName}` на сервере.
-  Ручной дубликат `DT_Cards` (standalone C++ не читает UAsset). `version()` -
-  FNV-1a от таблицы, для детекта рассинхронизации с клиентом. См.
-  [Идентификация карт](#идентификация-карт).
-- **Protocol** - бинарный `Writer` / `Reader` (u8 / u16 / u32 / string),
-  сборка и парсинг фреймов.
-- **Logger** - уровни, компоненты, ID сессии, hex-дампы, потокобезопасность.
-- **Utils** - преобразование ANSI → UTF-8, генерация ID комнат.
-- **Config** - парсинг `config.ini`.
-
----
-
 ## Docker
 
 Сервер собирается и запускается в Docker. Используется **multi-stage build**:
@@ -312,7 +319,7 @@ tcgserver   tcgserver:latest   Up 5 seconds   0.0.0.0:8080->8080/tcp
 docker compose up -d --build
 ```
 
-### Изменение config.ini в работающем контейнере
+### Изменение конфигурации в работающем контейнере
 
 `config.ini` живёт в named volume. Два способа его поменять.
 
@@ -343,6 +350,43 @@ docker compose up -d
 
 Boost SDK **не попадает в runtime** - Asio header-only, весь нужный код уже
 в бинарнике при сборке.
+
+---
+
+## Краткое описание модулей
+
+- **Server** - асинхронно принимает TCP-подключения, создаёт `Session`
+  на каждого клиента.
+- **Session** - обрабатывает входящие пакеты, хранит состояние игрока
+  (имя, комнату), ведёт аккумулятор входящих байт и парсит пакеты
+  по length-prefix.
+- **PlayerState** - снимок состояния одного игрока в комнате:
+  `playerId` / `playerName`; `attributes` (массив `AttrValue` - max/current
+  для `health` / `mana` / `defence`); `hand` / `deck` / `discard` как
+  `std::vector<uint16_t>`. Дефолты атрибутов
+  (15 / 10 / 10) задаются в конструкторе `PlayerState::PlayerState()`.
+- **Room** - модель игровой комнаты. Хранит игроков, IP хоста и **полное
+  состояние матча** (`hostState_` / `guestState_`): hand, deck, discard,
+  attributes, game phase, turn, winner. Отвечает за:
+    - инициализацию матча : раздача, бросок кубика, установка и запуск таймера;
+    - серверный таймер хода реализован на boost::asio::steady_timer;
+    - переключение хода
+    - обработку клиентского завершения хода: валидация, что
+      вызвал именно текущий игрок, иначе игнорирует;
+    - полный snapshot обоим игрокам.
+
+При отключении любого игрока комната закрывается целиком (
+оставшийся игрок получает `Error("Opponent disconnected")` и его
+сессия принудительно закрывается).
+- **CardRegistry** - таблица `{u16 id, string rowName}` на сервере.
+  Ручной дубликат `DT_Cards` (standalone C++ не читает UAsset). `version()` -
+  FNV-1a от таблицы, для детекта рассинхронизации с клиентом. См.
+  [Идентификация карт](#идентификация-карт).
+- **Protocol** - бинарный `Writer` / `Reader` (u8 / u16 / u32 / string),
+  сборка и парсинг фреймов.
+- **Logger** - уровни, компоненты, ID сессии, hex-дампы, потокобезопасность.
+- **Utils** - преобразование ANSI → UTF-8, генерация ID комнат.
+- **Config** - парсинг `config.ini`.
 
 ---
 
@@ -475,6 +519,10 @@ Card names may be wrong; sync DT_Cards.csv with client registry.
 | `0x01` | `CreateRoom` | `string playerName` |
 | `0x02` | `JoinRoom` | `string roomId` + `string playerName` |
 | `0x03` | `ListRooms` | - (пусто) |
+| `0x04` | `EndTurn` | - (пусто)|
+
+> **Примечание.** `EndTurn` не имеет прямого ответа - результат приходит 
+> как `StateSync` обоим игрокам.
 
 ### Опкоды сервера
 
@@ -484,8 +532,8 @@ Card names may be wrong; sync DT_Cards.csv with client registry.
 | `0x81` | `CreateRoomResponse` | `string roomId` |
 | `0x82` | `JoinRoomResponse` | `string roomId` |
 | `0x83` | `ListRoomsResponse` | `u16 count` + `count × (string roomId, string hostIp, u8 playersCount)` |
-| `0x90` | `MatchStart` | см. [MatchStart (0x90)](#matchstart-0x90) |
-| `0x91` | `StateSync` | см. [StateSync (0x91)](#statesync-0x91) |
+| `0x90` | `MatchStart` | см. [Старт матча](#старт-матча) |
+| `0x91` | `StateSync` | см. [Синхронизация состояний](#синхронизация-состояний) |
 
 > **Примечание.** Если в `ListRoomsResponse` нет ни одной комнаты,
 > `count = 0` и payload содержит только `u16 0x0000`.
@@ -512,6 +560,8 @@ u16 opp_attr_count
 u16 opp_hand_count
 str first_player_id
 u8  dice_roll
+u8  current_turn_time
+u8  turn_time_limit
 ```
 
 `your_attr_count = opp_attr_count = 3` - `health` / `mana` / `defence`.
@@ -541,6 +591,8 @@ u8  turn_number
 str current_turn_player_id
 u8  dice_roll
 str winner_player_id
+u8  current_turn_time
+u8  turn_time_limit
 
 str your_player_id
 str your_player_name
@@ -566,6 +618,63 @@ u16 ext_count
 `extensions` - контейнер `key -> value` для будущих правил (эффекты карт,
 щиты, дебаффы). Сервер заполнит его, когда появятся правила. Клиент,
 не знающий про поле, просто проигнорирует запись.
+
+### Управление ходом
+
+**Таймер хода.** На `Room` заведён
+`boost::asio::steady_timer`. Когда матч инициализирован
+(`initializeGame` -> `startTurnTimer`), сервер запускает
+`scheduleNextTick`: `expires_after(1s)`, `async_wait` → `onTurnTick`.
+
+В `onTurnTick`:
+
+1. Если таймер отменён (`operation_aborted`) или игра не в `Playing` -
+   `stopTurnTimer` и выход.
+2. `--currentTurnTime_`.
+3. Если `currentTurnTime_ == 0` -> `endTurn()` (автопереход).
+   Иначе -> `broadcastStateSync()` (клиенты видят тик таймера).
+4. `scheduleNextTick()` - следующий тик через 1 с.
+
+**Ручное завершение хода.**
+`Session::handleMessage` диспатчит `EndTurn` в
+`currentRoom_->handleEndTurn(session)`.
+
+`Room::handleEndTurn`:
+
+1. Проверяет `hasMatchState_ && gamePhase_ == Playing`.
+2. Определяет `callerId` по `hostSession_` / `guestSession_`. 
+Если это не участник комнаты - выход.
+3. Если `callerId != currentTurnPlayerId_` - пишет
+   `EndTurn ignored: caller=... current=...` в лог и выходит.
+4. Иначе вызывает `endTurn()`.
+
+**`endTurn()`:**
+
+1. `currentTurnPlayerId_` переключается на другого игрока.
+2. `++turnNumber_`.
+3. `currentTurnTime_ = turnTimeLimit_` (сброс на 30).
+4. `broadcastStateSync()` - оба клиента видят новый ход и новый таймер.
+
+**Остановка таймера.** 
+
+`stopTurnTimer` вызывается:
+
+- из `onTurnTick`, если игра не в `Playing`;
+- из `removePlayer`, когда `players_.empty()`;
+- при закрытии комнаты (через `removePlayer`).
+
+Отмена асинхронного `async_wait` через `turnTimer_.cancel()` -
+колбэк срабатывает с `operation_aborted` и корректно выходит.
+
+**Стартовая инициализация.** 
+
+В `initializeGame`:
+
+- `currentTurnTime_ = turnTimeLimit_` до `sendMatchStart` -
+  чтобы в `MatchStart` уже был корректный `current_turn_time`;
+- без `broadcastStateSync()` при инициализации - стартовое
+  состояние идёт через `MatchStart`;
+- после `sendMatchStart` обоим игрокам - `startTurnTimer()`.
 
 ### Инициализация матча
 
@@ -593,8 +702,6 @@ client A                        server                    client B
 
 Ключевое:
 
-Ключевое:
-
 1. **`MatchStart` - один раз** на игрока, при `room->playerCount() == 2`.
    Содержит всё, что нужно для стартового UI: рука, колода, атрибуты,
    `dice_roll`, `first_player_id`.
@@ -609,9 +716,10 @@ client A                        server                    client B
    понадобится, когда actions появятся.
 5. **При отключении одного игрока** комната закрывается целиком:
    второй получает `Error("Opponent disconnected")`, его сокет
-   закрывается. На клиенте срабатывает `OnDisconnected`, UI очищается.
+   закрывается, таймер отменяется (`stopTurnTimer`). 
+На клиенте срабатывает `OnDisconnected`, UI очищается.
 
-### Пример обмена
+### Примеры обмена
 
 **Создание комнаты:**
 
@@ -642,6 +750,216 @@ client A                        server                    client B
 
 ```
 <- [u16 25][u8 0x83][u16 1][u16 9]["ROOM-1234"][u16 9]["127.0.0.1"][u8 1]
+```
+
+**Завершение хода (текущим игроком):**
+
+```
+-> [u16 3][u8 0x04]
+  hex: 03 00 04
+
+<- [u16 ...][u8 0x91][...]
+```
+`StateSync` обоим игрокам, `current_turn_player` сменился,
+`current_turn_time = 30`
+
+**Завершение хода (не текущим игроком):**
+
+```
+-> [u16 3][u8 0x04]
+```
+`StateSync` не рассылается; в логе сервера: `EndTurn ignored: caller = P2 current = P1`
+
+**Тик таймера (раз в секунду):**
+
+```
+<- [u16 ...][u8 0x91][...]
+```
+`StateSync` обоим игрокам, `current_turn_time` уменьшился на 1,
+`state_seq++`
+
+### Примеры формата пакетов сервера при MatchStart, StateSync, EndTurn
+
+Контекст для примеров:
+
+- `room_id = "ROOM-1234"`, `registry_version = 0x41DF532A`, `wire_version = 2`
+- игрок `P1 = "Alice"`, 
+рука `5` карт (`0x0001..0x0005`), 
+колода `3` (`0x0006..0x0008`), 
+атрибуты `hp=15/15`, `mana=10/10`, `def=10/10`
+- противник `P2 = "Bob"`, 
+рука `5` (`0x0011..0x0015`), 
+колода `3` (`0x0021..0x0023`), 
+те же атрибуты
+- `turn_time_limit = 30 (0x1E)`
+
+#### 1. `MatchStart (0x90)` - при инициализации матча
+
+Сервер отправляет этот пакет **один раз каждому игроку** сразу после `players_.size() == 2`. 
+`Alice` видит себя как `your_*`, а `Bob-а` как `opp_*`. 
+Внутри - `current_turn_time = 30` и `turn_time_limit = 30` в самом конце payload.
+
+Полный пакет для `Alice` (171 байт):
+
+```
+AB 00                                                    ; length = 0xAB = 171 (opcode + payload)
+90                                                       ; opcode = 0x90 (MatchStart)
+
+; --- payload (170 байт) ---
+02 00 00 00                                              ; wire_version = 2
+2A 53 DF 41                                              ; registry_version = 0x41DF532A (LE)
+09 00 52 4F 4F 4D 2D 31 32 33 34                         ; room_id = "ROOM-1234"
+02 00 50 31                                              ; your_player_id = "P1"
+05 00 41 6C 69 63 65                                     ; your_player_name = "Alice"
+03 00                                                    ; your_attr_count = 3
+06 00 68 65 61 6C 74 68 0F 00 00 00 0F 00 00 00          ;   health  15/15
+04 00 6D 61 6E 61 0A 00 00 00 0A 00 00 00                ;   mana    10/10
+07 00 64 65 66 65 6E 63 65 0A 00 00 00 0A 00 00 00       ;   defence 10/10
+05 00                                                    ; your_hand_count = 5
+01 00 02 00 03 00 04 00 05 00                            ;   hand ids 0x01..0x05
+03 00                                                    ; your_deck_count = 3
+06 00 07 00 08 00                                        ;   deck ids 0x06..0x08
+05 00                                                    ; your_hand+discard = 5
+02 00 50 32                                              ; opponent_player_id = "P2"
+03 00 42 6F 62                                           ; opponent_player_name = "Bob"
+03 00                                                    ; opp_attr_count = 3
+06 00 68 65 61 6C 74 68 0F 00 00 00 0F 00 00 00          ;   health  15/15
+04 00 6D 61 6E 61 0A 00 00 00 0A 00 00 00                ;   mana    10/10
+07 00 64 65 66 65 6E 63 65 0A 00 00 00 0A 00 00 00       ;   defence 10/10
+05 00                                                    ; opp_hand_count = 5
+05 00                                                    ; opp_hand+discard = 5
+02 00 50 31                                              ; first_player_id = "P1"
+05                                                       ; dice_roll = 5
+1E                                                       ; current_turn_time = 30
+1E                                                       ; turn_time_limit  = 30
+```
+
+Для `Bob` - те же байты, только `your_*` = `"P2"/"Bob"/...`, 
+`opp_*` = `"P1"/"Alice"/...`. `current_turn_time`/`turn_time_limit` тоже `1E 1E`.
+
+**Важно:**
+
+- Последние **2 байта payload** - это `current_turn_time` и `turn_time_limit`. 
+На старте они всегда равны (`1E 1E` = 30 и 30).
+- `first_player_id` + `dice_roll` определяют, чей ход первый. 
+Если выиграл бросок `P1`, то в `StateSync` `current_turn_player_id` будет `"P1"` до первого `EndTurn` / автоперехода.
+Длина пакета зависит от размера руки/колоды (по 2 байта на карту).
+- Id карт противника не передаются.
+
+#### 2. Тик таймера - `StateSync (0x91)` каждую секунду
+
+Первый тик приходит ровно через `1 с` после `startTurnTimer()` в `initializeGame`. 
+Payload - полный snapshot (в нашем примере 198 байт, пакет 199).
+
+##### Тик #1: `state_seq = 1`, `current_turn_time = 29`
+
+```
+BB 00                                                    ; length = 0xBB = 187 (opcode + payload)
+91                                                       ; opcode = 0x91 (StateSync)
+
+; --- payload (186 байт) ---
+02 00 00 00                                              ; wire_version = 2
+2A 53 DF 41                                              ; registry_version
+01 00 00 00                                              ; state_seq = 1
+09 00 52 4F 4F 4D 2D 31 32 33 34                         ; room_id = "ROOM-1234"
+01                                                       ; game_phase = Playing
+01                                                       ; turn_number = 1
+02 00 50 31                                              ; current_turn_player_id = "P1"
+05                                                       ; dice_roll = 5
+00 00                                                    ; winner_player_id = "" (пусто)
+1D                                                       ; current_turn_time = 29
+1E                                                       ; turn_time_limit  = 30
+
+; --- me (84 байта) ---
+02 00 50 31                                              ; your_player_id  = "P1"
+05 00 41 6C 69 63 65                                     ; your_player_name = "Alice"
+03 00                                                    ; your_attr_count
+06 00 68 65 61 6C 74 68 0F 00 00 00 0F 00 00 00
+04 00 6D 61 6E 61 0A 00 00 00 0A 00 00 00
+07 00 64 65 66 65 6E 63 65 0A 00 00 00 0A 00 00 00
+05 00                                                    ; your_hand_count = 5
+01 00 02 00 03 00 04 00 05 00                            ;   hand ids
+03 00                                                    ; your_deck_count = 3
+06 00 07 00 08 00                                        ;   deck ids
+00 00                                                    ; your_discard_count = 0
+05 00                                                    ; your_hand+discard = 5
+
+; --- opp (66 байт) ---
+02 00 50 32                                              ; opp_player_id = "P2"
+03 00 42 6F 62                                           ; opp_player_name = "Bob"
+03 00                                                    ; opp_attr_count
+06 00 68 65 61 6C 74 68 0F 00 00 00 0F 00 00 00
+04 00 6D 61 6E 61 0A 00 00 00 0A 00 00 00
+07 00 64 65 66 65 6E 63 65 0A 00 00 00 0A 00 00 00
+05 00                                                    ; opp_hand_count = 5
+03 00                                                    ; opp_deck_count = 3
+00 00                                                    ; opp_discard_count = 0
+05 00                                                    ; opp_hand+discard = 5
+
+00 00                                                    ; ext_count = 0                                                    ; ext_count = 0
+```
+
+##### Тик #2: `state_seq = 2`, `current_turn_time = 28`
+
+Полный пакет **побайтово идентичен** тику #1, кроме двух байт:
+
+```
+01 00 00 00   ->  02 00 00 00     ; state_seq   1 -> 2
+1D            ->  1C              ; cur_time   29 -> 28
+```
+
+Всё остальное (рука, колода, атрибуты, `current_turn_player_id`, `turn_number`) - то же самое. 
+
+##### Тик #3 … #N
+
+Аналогично, пока `current_turn_time` не дойдёт до `1`. Тик #30 (если никто не нажимал `EndTurn`):
+
+```
+state_seq = 30
+current_turn_time = 00
+```
+
+И сразу после него сервер вызовет `endTurn()` -> следующий `StateSync` 
+уже с `current_turn_player_id = "P2"`, `turn_number = 2`, `current_turn_time = 30 (1E)`. 
+То есть клиент увидит:
+
+```
+Тик 29: StateSync (seq=29) -> cur_time=1,  cur_turn="P1", turn=1
+Тик 30: StateSync (seq=30) -> cur_time=30, cur_turn="P2", turn=2
+Тик 31: StateSync (seq=31) -> cur_time=29, cur_turn="P2", turn=2
+```
+
+#### 3. `EndTurn (0x04)` от клиента и ответный `StateSync`
+
+Клиент `P1` (текущий игрок) шлёт пустой `EndTurn`:
+
+```
+03 00                                                    ; length = 3
+04                                                       ; opcode = 0x04 (EndTurn)
+                                                         ; payload пустой
+```
+
+Прямого ответа нет - сервер рассылает `StateSync` обоим.
+
+```
+state_seq              -> 03 00 00 00
+current_turn_player_id -> 02 00 50 32
+turn_number            -> 02
+current_turn_time      -> 1E
+turn_time_limit        -> 1E
+```
+
+Остальные байты (руки, колоды, атрибуты) - без изменений. 
+`current_turn_player_id` теперь `"P2"`, поэтому у `Bob` в UI «мой ход», у `Alice` - «ход врага».
+
+#### Если `EndTurn` шлёт не текущий игрок
+
+Сервер **ничего не отвечает** (ни `StateSync`, ни `Error`). 
+
+В логе:
+
+```
+[ROOM:ROOM-1234] EndTurn ignored: caller = P1 current = P2
 ```
 
 ### Почему бинарный формат
@@ -681,7 +999,7 @@ port = 8080
 Незнакомые ключи игнорируются. Некорректный `port` - остаётся значение
 по умолчанию.
 
-### Где лежит файл
+### Расположение файла
 
 | Способ запуска | Путь к `config.ini` |
 |---|---|
