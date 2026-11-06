@@ -23,7 +23,7 @@ namespace {
     };
 
     constexpr int32_t kInitialHandSize = 5;
-    constexpr int32_t kDeckSize = 20;
+    constexpr int32_t kDeckSize = 30;
 
     template<typename T>
     void shuffleDeck(std::vector<T>& deck) {
@@ -339,6 +339,26 @@ void Room::endTurn() {
     currentTurnPlayerId_ = (currentTurnPlayerId_ == "P1") ? "P2" : "P1";
     ++turnNumber_;
     currentTurnTime_ = turnTimeLimit_;
+
+    PlayerState& newCurrent = (currentTurnPlayerId_ == "P1") ? hostState_ : guestState_;
+    const int32_t received = static_cast<int32_t>(newCurrent.hand.size() + newCurrent.discard.size());
+
+    if (received >= kDeckSize) {
+        Logger::warn("ROOM:" + id_,
+            "Draw skipped: " + newCurrent.playerId +
+            " at max received (" + std::to_string(received) +
+            " >= " + std::to_string(kDeckSize) + ")");
+    } else {
+        const uint16_t drawn = newCurrent.deck.back();
+        newCurrent.deck.pop_back();
+        newCurrent.hand.push_back(drawn);
+        Logger::info("ROOM:" + id_,
+            "Draw: " + newCurrent.playerId +
+            " card=" + std::to_string(drawn) +
+            " hand=" + std::to_string(newCurrent.hand.size()) +
+            " deck=" + std::to_string(newCurrent.deck.size()) +
+            " received=" + std::to_string(received + 1));
+    }
 
     Logger::info("ROOM:" + id_,
         "Turn -> " + currentTurnPlayerId_ + " (turn #" + std::to_string(turnNumber_) + ")");

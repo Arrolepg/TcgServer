@@ -74,6 +74,14 @@
 - Клиентский ход: игрок может завершить свой ход
   досрочно. Сервер валидирует, что вызвал именно текущий игрок - иначе
   игнорирует.
+- Добор карты при смене хода: при любом переходе хода новый текущий игрок берёт
+  верхнюю карту (`deck.back()`) из своей колоды в руку. Добор пропускается
+  только когда игрок уже получил суммарно `>= kDeckSize` карт
+  (`hand + discard`, соответствует `YourRecieved` / `OpponentRecieved`
+  в `StateSync`) - в лог пишется
+  `Draw skipped: <playerId> at max received (<N> >= <kDeckSize>)`.
+  Что означает, что после того как игрок получил все `kDeckSize`
+  карт колоды, добор больше не происходит.
 - Синхронизация - полный snapshot состояния.
 - Хранение состояния игроков в `Room` между отправками: `hand` / `deck` /
   `discard` / `attributes` не пересоздаются на каждый пакет.
@@ -89,6 +97,11 @@
 - Кроссплатформенный код (Windows / Linux / macOS).
 - Готов к запуску в Docker (многостадийная сборка (multi-stage build), 
 финальный образ без дистрибутива (distroless runtime)).
+
+> Размер колоды - `kDeckSize = 30`.
+> Стартовая рука - `kInitialHandSize = 5`.
+> Полный размер «пула карт» игрока за матч:
+> `hand + discard + deck = 30`.
 
 ---
 
@@ -543,7 +556,7 @@ Card names may be wrong; sync DT_Cards.csv with client registry.
 Сервер отправляет обоим игрокам **один раз** при заполнении комнаты (2/2).
 Содержит всё, что нужно клиенту для входа в матч.
 
-> **BP-контракт (UE):** формат соответствует `FST_MatchInitData`.
+Формат пакета при иниицализации матча:
 
 ```
 u32 wire_version
@@ -565,7 +578,7 @@ u8  turn_time_limit
 ```
 
 `your_attr_count = opp_attr_count = 3` - `health` / `mana` / `defence`.
-Порядок и `rowName` фиксированы (`kAttrs` в `Room.cpp`).
+Порядок и `rowName` фиксированы.
 
 ### Синхронизация состояний
 
@@ -579,7 +592,7 @@ u8  turn_time_limit
 
 Клиент хранит последний `LastStateSync` для catch-up и рендерит UI.
 
-> **BP-контракт (UE):** формат соответствует `FST_StateSyncData`.
+Формат пакетов при синхронизации состояний:
 
 ```
 u32 wire_version
@@ -612,8 +625,7 @@ u16 ext_count
 ```
 
 `state_seq` монотонно растёт: `1` - после первого действия и т.д.
-Клиент игнорирует пакеты с `state_seq` меньше уже применённого
-(защита от переупорядочивания).
+Клиент игнорирует пакеты с `state_seq` меньше уже применённого.
 
 `extensions` - контейнер `key -> value` для будущих правил (эффекты карт,
 щиты, дебаффы). Сервер заполнит его, когда появятся правила. Клиент,
@@ -621,7 +633,9 @@ u16 ext_count
 
 ### Управление ходом
 
-**Таймер хода.** На `Room` заведён
+**Таймер хода.** 
+
+На `Room` заведён
 `boost::asio::steady_timer`. Когда матч инициализирован
 (`initializeGame` -> `startTurnTimer`), сервер запускает
 `scheduleNextTick`: `expires_after(1s)`, `async_wait` → `onTurnTick`.
@@ -636,6 +650,7 @@ u16 ext_count
 4. `scheduleNextTick()` - следующий тик через 1 с.
 
 **Ручное завершение хода.**
+
 `Session::handleMessage` диспатчит `EndTurn` в
 `currentRoom_->handleEndTurn(session)`.
 
@@ -653,7 +668,19 @@ u16 ext_count
 1. `currentTurnPlayerId_` переключается на другого игрока.
 2. `++turnNumber_`.
 3. `currentTurnTime_ = turnTimeLimit_` (сброс на 30).
-4. `broadcastStateSync()` - оба клиента видят новый ход и новый таймер.
+4. Новый текущий игрок пытается добрать одну карту с верха (`back()`)
+   своей колоды в руку.
+    - Лимит полученных карт: если
+      `hand.size() + discard.size() >= kDeckSize` (по умолчанию `30`),
+      добор пропускается, в лог пишется
+      `Draw skipped: <playerId> at max received (<N> >= <kDeckSize>)`.
+    - Иначе - добор: `deck.pop_back()` -> `hand.push_back(drawn)`; в
+      лог пишется
+      `Draw: <playerId> card=<id> hand=<n> deck=<m> received=<r>`,
+      где `r = hand + discard` после добора.
+5. `broadcastStateSync()` - оба клиента видят новый ход, нового текущего
+   игрока, свежие `hand`/`deck` (включая добор или его пропуск) и новый
+   таймер.
 
 **Остановка таймера.** 
 
@@ -939,22 +966,71 @@ current_turn_time = 00
                                                          ; payload пустой
 ```
 
-Прямого ответа нет - сервер рассылает `StateSync` обоим.
+Прямого ответа нет - сервер рассылает `StateSync` обоим. Перед рассылкой
+`endTurn()` переключает ход и даёт новому текущему игроку добрать карту с
+верха колоды.
+
+Так как payload собирается per-player, сервер отправляет два разных
+пакета (`your_*` и `opp_*` меняются местами). Ниже - что изменилось
+относительно тика #2 (`state_seq = 2`, `cur_time = 28`, `cur_turn = "P1"`,
+`turn = 1`, руки 5/5, колоды 3/3). Всё, что не указано, - без изменений.
+
+**Для `P1` (Alice - свой ход закончился, Bob добрал):**
 
 ```
 state_seq              -> 03 00 00 00
-current_turn_player_id -> 02 00 50 32
+current_turn_player_id -> 02 00 50 32 ("P1" -> "P2")
 turn_number            -> 02
-current_turn_time      -> 1E
-turn_time_limit        -> 1E
+current_turn_time      -> 1E (28 -> 30)
+turn_time_limit        -> 1E (без изменений)
+
+opp_hand_count         -> 06 00 (5 -> 6)
+opp_hand+discard       -> 06 00 (5 -> 6)
+opp_deck_count         -> 02 00 (3 -> 2)
 ```
 
-Остальные байты (руки, колоды, атрибуты) - без изменений. 
-`current_turn_player_id` теперь `"P2"`, поэтому у `Bob` в UI «мой ход», у `Alice` - «ход врага».
+`P1` не добирал - блок `your_*` без изменений. В блоке `opp_*` у `P2`
+рука 5 -> 6, колода 3 -> 2. 
+
+В логе сервера: `Draw: P2 card=35 hand=6 deck=2 received=6`.
+
+**Для `P2` (Bob - начал ход, добрал карту):**
+
+```
+state_seq              -> 03 00 00 00
+current_turn_player_id -> 02 00 50 32 ("P1" -> "P2")
+turn_number            -> 02
+current_turn_time      -> 1E (28 -> 30)
+turn_time_limit        -> 1E (без изменений)
+
+your_hand_count        -> 06 00 (5 -> 6)
+your_hand+discard      -> 06 00 (5 -> 6)
+your_deck_count        -> 02 00 (3 -> 2)
+```
+
+`P2` добрал - в блоке `your_*` рука 5 -> 6, колода
+3 -> 2. В блоке `opp_*` у `P1` без изменений.
+
+`current_turn_player_id` теперь `"P2"`, поэтому у `Bob` в UI «мой ход», у
+`Alice` - «ход врага»; у `Bob` `YourHandRowNames.Length` = 6 и
+`CardCountPlayer` -> `6/30`, у `Alice` `OpponentHandCount` на `EnemyHud`
+= 6.
+
+Тот же пакет при автопереходе по таймауту - байты идентичны; разница
+только в триггере (`onTurnTick` вместо `handleEndTurn`).
+
+Если лимит сработал (`received == kDeckSize == 30`): у нового текущего
+игрока `hand + discard == 30`, добор пропускается. `StateSync` всё равно
+уходит обоим - меняются только `state_seq`, `current_turn_player_id`,
+`turn_number`, `current_turn_time`; руки, колоды и `*_hand+discard` у
+обоих игроков остаются как были. В логе сервера:
+`Draw skipped: P2 at max received (30 >= 30)`. Клиент покажет
+`CardCountPlayer` = `30/30`.
 
 #### Если `EndTurn` шлёт не текущий игрок
 
-Сервер **ничего не отвечает** (ни `StateSync`, ни `Error`). 
+Сервер ничего не отвечает (ни `StateSync`, ни `Error`). `endTurn()`
+не вызывается, добора нет, `state_seq` не растёт.  
 
 В логе:
 
