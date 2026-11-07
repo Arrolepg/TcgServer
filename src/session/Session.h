@@ -37,6 +37,8 @@ private:
     void handleListRooms();
     void handleEndTurn();
 
+    void handleRollDice();
+
     void onDisconnect();
 
     std::string tag() const;
