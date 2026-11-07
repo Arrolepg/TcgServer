@@ -44,9 +44,12 @@ public:
     void handleEndTurn(const std::shared_ptr<Session>& caller);
     void stopTurnTimer();
 
+    void handleRollDice(const std::shared_ptr<Session>& caller);
+
 private:
     std::vector<char> buildMatchStartPayload(const PlayerState& me, const PlayerState& opp) const;
     std::vector<char> buildStateSyncPayload(const PlayerState& me, const PlayerState& opp) const;
+    std::vector<char> buildDiceRollResultPayload(uint8_t diceValue) const;
 
     void endTurn();
     void startTurnTimer();
@@ -68,6 +71,8 @@ private:
     uint32_t stateSeq_ = 0;
     uint8_t turnNumber_ = 0;
     uint8_t diceRoll_ = 0;
+    bool hasRolledThisTurn_ = false;
+
     Protocol::GamePhase gamePhase_ = Protocol::GamePhase::Init;
     std::string firstPlayerId_;
     std::string currentTurnPlayerId_;
