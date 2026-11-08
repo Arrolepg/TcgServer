@@ -17,6 +17,7 @@ const char* opcodeName(Protocol::Opcode op) {
         case Protocol::Opcode::JoinRoom: return "JoinRoom";
         case Protocol::Opcode::ListRooms: return "ListRooms";
         case Protocol::Opcode::EndTurn: return "EndTurn";
+        case Protocol::Opcode::RollDice: return "RollDice";
 
         case Protocol::Opcode::Error: return "Error";
         case Protocol::Opcode::CreateRoomResponse: return "CreateRoomResponse";
@@ -24,6 +25,7 @@ const char* opcodeName(Protocol::Opcode op) {
         case Protocol::Opcode::ListRoomsResponse: return "ListRoomsResponse";
         case Protocol::Opcode::MatchStart: return "MatchStart";
         case Protocol::Opcode::StateSync: return "StateSync";
+        case Protocol::Opcode::DiceRollResult: return "DiceRollResult";
     }
     return "Unknown";
 }
@@ -161,6 +163,7 @@ void Session::handleMessage(Protocol::Opcode opcode, const std::vector<char>& pa
         case Protocol::Opcode::JoinRoom: handleJoinRoom(r); break;
         case Protocol::Opcode::ListRooms: handleListRooms(); break;
         case Protocol::Opcode::EndTurn: handleEndTurn(); break;
+        case Protocol::Opcode::RollDice: handleRollDice(); break;
 
         default: {
             logWarn("Unknown opcode received: " + opcodeStr(opcode));
@@ -309,6 +312,15 @@ void Session::handleEndTurn() {
     }
     logInfo("EndTurn requested");
     currentRoom_->handleEndTurn(shared_from_this());
+}
+
+void Session::handleRollDice() {
+    if (!currentRoom_) {
+        logWarn("RollDice: player not in a room");
+        return;
+    }
+    logInfo("RollDice requested");
+    currentRoom_->handleRollDice(shared_from_this());
 }
 
 void Session::onDisconnect() {

@@ -255,6 +255,7 @@ std::vector<char> Room::buildStateSyncPayload(const PlayerState& me, const Playe
     writeDeck(w, me);
     writeDiscard(w, me);
     w.u16(static_cast<uint16_t>(me.hand.size() + me.discard.size()));
+    w.u8(hasRolledThisTurn_ ? 1 : 0);
 
     w.str(opp.playerId);
     w.str(opp.playerName);
@@ -339,6 +340,7 @@ void Room::endTurn() {
     currentTurnPlayerId_ = (currentTurnPlayerId_ == "P1") ? "P2" : "P1";
     ++turnNumber_;
     currentTurnTime_ = turnTimeLimit_;
+    hasRolledThisTurn_ = false;
 
     PlayerState& newCurrent = (currentTurnPlayerId_ == "P1") ? hostState_ : guestState_;
     const int32_t received = static_cast<int32_t>(newCurrent.hand.size() + newCurrent.discard.size());
@@ -380,4 +382,83 @@ void Room::handleEndTurn(const std::shared_ptr<Session> &caller) {
         return;
     }
     endTurn();
+}
+
+void Room::handleRollDice(const std::shared_ptr<Session> &caller) {
+    if (!hasMatchState_ || gamePhase_ != Protocol::GamePhase::Playing) {
+        Logger::debug("ROOM:" + id_,
+            "RollDice ignored: game not in playing state");
+        return;
+    }
+
+    std::string callerId;
+    if (caller == hostSession_) callerId = "P1";
+    else if (caller == guestSession_) callerId = "P2";
+    else return;
+
+    if (callerId != currentTurnPlayerId_) {
+        Logger::debug("ROOM:" + id_,
+            "RollDice ignored: caller = " + callerId +
+            " current = " + currentTurnPlayerId_);
+        return;
+    }
+    if (hasRolledThisTurn_) {
+        Logger::debug("ROOM:" + id_,
+        "RollDice ignored: already rolled this turn by " + callerId);
+        return;
+    }
+    hasRolledThisTurn_ = true;
+
+    static std::mt19937 rng(std::random_device{}());
+    std::uniform_int_distribution<int> dist(1, 6);
+    const uint8_t diceValue = static_cast<uint8_t>(dist(rng));
+
+    PlayerState& player = (callerId == "P1") ? hostState_ : guestState_;
+
+    auto& mana = player.attributes[Attr_Mana];
+    const int32_t manaBefore = mana.current;
+    if (mana.current < mana.max) {
+        mana.current = std::min(mana.current + diceValue, mana.max);
+    }
+    Logger::info("ROOM:" + id_,
+        "Dice=" + std::to_string(diceValue) + " by " + callerId +
+        " mana " + std::to_string(manaBefore) + "->" +
+        std::to_string(mana.current) + "/" + std::to_string(mana.max));
+
+    auto drawCard = [&]() -> bool {
+        if (player.deck.empty()) return false;
+        const int32_t received = static_cast<int32_t>(player.hand.size() + player.discard.size());
+        if (received >= kDeckSize) return false;
+        const uint16_t c = player.deck.back();
+        player.deck.pop_back();
+        player.hand.push_back(c);
+        Logger::info("ROOM:" + id_,
+            "Dice bonus draw " + callerId +
+            " card=" + std::to_string(c) +
+            " hand=" + std::to_string(player.hand.size()) +
+            " deck=" + std::to_string(player.deck.size()) +
+            " received=" + std::to_string(received + 1));
+        return true;
+    };
+
+    if (diceValue == 1) {
+        drawCard();
+    } else if (diceValue == 6) {
+        drawCard();
+        drawCard();
+    }
+
+    auto dicePkt = Protocol::buildPacket(
+        Protocol::Opcode::DiceRollResult,
+        buildDiceRollResultPayload(diceValue));
+    if (hostSession_) hostSession_->send(dicePkt);
+    if (guestSession_) guestSession_->send(dicePkt);
+
+    broadcastStateSync();
+}
+
+std::vector<char> Room::buildDiceRollResultPayload(uint8_t diceValue) const {
+    Protocol::Writer w;
+    w.u8(diceValue);
+    return w.data();
 }

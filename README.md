@@ -3,9 +3,10 @@
 Сервер для карточной игры (TCG) на C++17 с использованием Boost.Asio.
 Принимает TCP-подключения, позволяет создавать игровые комнаты, присоединяться
 к ним и получать список доступных комнат. При заполнении комнаты (2/2)
-сервер инициализирует матч, отправляет клиентам полное состояние игры и запускает 
+сервер инициализирует матч, отправляет клиентам полное состояние игры и запускает
 таймер хода. Ход можно завершить вручную или по истечении таймера - сервер самостоятельно
-перключит игрока.
+переключит игрока. В свой ход игрок может бросить кубик - в зависимости от выпавшего значения
+применяются определенные правила.
 
 Протокол - бинарный, с length-prefixed фреймингом. Общение идёт байтами
 с явными типами и длинами, без `\0`-терминаторов и текстовых разделителей.
@@ -82,6 +83,22 @@
   `Draw skipped: <playerId> at max received (<N> >= <kDeckSize>)`.
   Что означает, что после того как игрок получил все `kDeckSize`
   карт колоды, добор больше не происходит.
+- Бросок кубика в свой ход. Один раз за ход
+  (`hasRolledThisTurn`). Сервер валидирует -> вызвал именно текущий игрок,
+  фаза `Playing`, кубик ещё не брошен в этом ходу - иначе игнорирует.
+    - Кубик `1` -> `mana` +1 (до `max`), добрать 1 карту.
+    - Кубик `2..5` -> `mana` +N (до `max`), без добора.
+    - Кубик `6` -> `mana` +6 (до `max`), добрать 2 карты.
+    - Восстановление маны только если `mana.current < mana.max`;
+      иначе мана не меняется.
+    - Добор карт лимитируется тем же правилом `received >= kDeckSize`
+      (`hand + discard >= 30`) - если лимит достигнут, карта не
+      добирается, но кубик всё равно засчитан.
+    - После броска сервер сначала рассылает `DiceRollResult`
+      с выпавшим числом обоим игрокам, затем `StateSync`
+      с обновлённым состоянием и `has_rolled_this_turn = 1`.
+    - `has_rolled_this_turn` сбрасывается в `0` при смене хода
+      (`endTurn()` / автопереход по таймеру).
 - Синхронизация - полный snapshot состояния.
 - Хранение состояния игроков в `Room` между отправками: `hand` / `deck` /
   `discard` / `attributes` не пересоздаются на каждый пакет.
@@ -372,7 +389,8 @@ Boost SDK **не попадает в runtime** - Asio header-only, весь ну
   на каждого клиента.
 - **Session** - обрабатывает входящие пакеты, хранит состояние игрока
   (имя, комнату), ведёт аккумулятор входящих байт и парсит пакеты
-  по length-prefix.
+  по length-prefix. Диспатчит `EndTurn` и `RollDice` в `currentRoom_`
+  (`handleEndTurn` / `handleRollDice`).
 - **PlayerState** - снимок состояния одного игрока в комнате:
   `playerId` / `playerName`; `attributes` (массив `AttrValue` - max/current
   для `health` / `mana` / `defence`); `hand` / `deck` / `discard` как
@@ -386,6 +404,11 @@ Boost SDK **не попадает в runtime** - Asio header-only, весь ну
     - переключение хода
     - обработку клиентского завершения хода: валидация, что
       вызвал именно текущий игрок, иначе игнорирует;
+    - обработку `RollDice`: валидация (свой ход, фаза `Playing`,
+      `hasRolledThisTurn_ == false`), генерация значения `1..6`,
+      восстановление `mana` (до `max`), бонусный добор
+      (`1` -> 1 карта, `6` -> 2 карты), рассылка `DiceRollResult`
+      обоим игрокам и `StateSync` с обновлённым состоянием;
     - полный snapshot обоим игрокам.
 
 При отключении любого игрока комната закрывается целиком (
@@ -532,10 +555,15 @@ Card names may be wrong; sync DT_Cards.csv with client registry.
 | `0x01` | `CreateRoom` | `string playerName` |
 | `0x02` | `JoinRoom` | `string roomId` + `string playerName` |
 | `0x03` | `ListRooms` | - (пусто) |
-| `0x04` | `EndTurn` | - (пусто)|
+| `0x04` | `EndTurn` | - (пусто) |
+| `0x05` | `RollDice` | - (пусто) |
 
-> **Примечание.** `EndTurn` не имеет прямого ответа - результат приходит 
+> **Примечание.** `EndTurn` не имеет прямого ответа - результат приходит
 > как `StateSync` обоим игрокам.
+>
+> **Примечание.** `RollDice` не имеет прямого ответа, но порождает
+> два пакета от сервера: `DiceRollResult` с выпавшим
+> значением и следом `StateSync` с обновлённым состоянием.
 
 ### Опкоды сервера
 
@@ -544,33 +572,56 @@ Card names may be wrong; sync DT_Cards.csv with client registry.
 | `0x80` | `Error` | `string message` |
 | `0x81` | `CreateRoomResponse` | `string roomId` |
 | `0x82` | `JoinRoomResponse` | `string roomId` |
-| `0x83` | `ListRoomsResponse` | `u16 count` + `count × (string roomId, string hostIp, u8 playersCount)` |
+| `0x83` | `ListRoomsResponse` | `u16 count` + `count * (string roomId, string hostIp, u8 playersCount)` |
 | `0x90` | `MatchStart` | см. [Старт матча](#старт-матча) |
 | `0x91` | `StateSync` | см. [Синхронизация состояний](#синхронизация-состояний) |
+| `0x92` | `DiceRollResult` | `u8 dice_value` |
 
 > **Примечание.** Если в `ListRoomsResponse` нет ни одной комнаты,
 > `count = 0` и payload содержит только `u16 0x0000`.
+>
+> **Примечание.** `DiceRollResult` рассылается обоим
+> игрокам сразу после валидного `RollDice`, перед `StateSync`.
+> Payload - ровно `1` байт: выпавшее значение `1..6`.
 
 ### Старт матча
 
 Сервер отправляет обоим игрокам **один раз** при заполнении комнаты (2/2).
 Содержит всё, что нужно клиенту для входа в матч.
 
-Формат пакета при иниицализации матча:
+Формат пакета при инициализации матча:
 
 ```
+u16 length              ; = 1 (opcode) + len(payload)
+u8  opcode              ; 0x90 (MatchStart)
+
+; --- payload (length - 1) ---
 u32 wire_version
 u32 registry_version
 str room_id
 str your_player_id
 str your_player_name
 u16 your_attr_count
+  * your_attr_count:
+    str attr_row        ; "health" / "mana" / "defence"
+    u32 attr_max
+    u32 attr_current
 u16 your_hand_count
+  * your_hand_count:
+    u16 card_id
 u16 your_deck_count
+  * your_deck_count:
+    u16 card_id
+u16 your_received       ; your_hand_count + your_discard_count
 str opponent_player_id
 str opponent_player_name
 u16 opp_attr_count
+  * opp_attr_count:
+    str attr_row
+    u32 attr_max
+    u32 attr_current
 u16 opp_hand_count
+u16 opp_received        ; opp_hand_count + opp_discard_count
 str first_player_id
 u8  dice_roll
 u8  current_turn_time
@@ -580,6 +631,23 @@ u8  turn_time_limit
 `your_attr_count = opp_attr_count = 3` - `health` / `mana` / `defence`.
 Порядок и `rowName` фиксированы.
 
+**Пояснения:**
+
+- `length` и `opcode` - заголовок фрейма (см. [Формат пакета](#формат-пакета)). 
+Они не входят в `payload`.
+- За полями `*_count` сразу идут сами элементы: за `your_attr_count`
+    - `attr_row`/`attr_max`/`attr_current` * N, за `your_hand_count` и
+      `your_deck_count` - `u16 card_id` * N. В `MatchStart` id карт
+      противника не передаются - только их количество (`opp_hand_count`).
+- `your_received` / `opp_received` - это `hand + discard` (в
+  `MatchStart` discard ещё пуст, поэтому `received == hand_count`).
+  Используется клиентом как счётчик «получено карт из 30».
+- `has_rolled_this_turn` в `MatchStart` не передаётся (матч только
+  начался, кубик ещё не бросали); это поле есть только в `StateSync`.
+- Последние 2 байта payload - `current_turn_time` и
+  `turn_time_limit`. На старте всегда равны (`1E 1E` = 30 и 30).
+- `first_player_id` + `dice_roll` определяют, чей ход первый.
+
 ### Синхронизация состояний
 
 Полный snapshot состояния матча. Сервер отправляет:
@@ -588,48 +656,93 @@ u8  turn_time_limit
 - `state_seq` начинается с 1 (первое действие) и растёт монотонно.
 
 **На старте `StateSync` не отправляется.** Стартовое состояние передаётся
-в `MatchStart (0x90)`, что явялется событием, а не потоком состояния.
+в `MatchStart (0x90)`, что является событием, а не потоком состояния.
 
 Клиент хранит последний `LastStateSync` для catch-up и рендерит UI.
 
-Формат пакетов при синхронизации состояний:
+Формат пакета при синхронизации состояний:
 
 ```
+u16 length              ; = 1 (opcode) + len(payload)
+u8  opcode              ; 0x91 (StateSync)
+
+; --- payload (length - 1) ---
 u32 wire_version
 u32 registry_version
 u32 state_seq
 str room_id
-u8  game_phase
+u8  game_phase          ; 0 = Init, 1 = Playing, 2 = Finished
 u8  turn_number
 str current_turn_player_id
 u8  dice_roll
-str winner_player_id
+str winner_player_id    ; "" пока не Finished
 u8  current_turn_time
 u8  turn_time_limit
 
+; --- me ---
 str your_player_id
 str your_player_name
 u16 your_attr_count
+  * your_attr_count:
+    str attr_row
+    u32 attr_max
+    u32 attr_current
 u16 your_hand_count
+  * your_hand_count:
+    u16 card_id
 u16 your_deck_count
+  * your_deck_count:
+    u16 card_id
 u16 your_discard_count
+  * your_discard_count:
+    u16 card_id
+u16 your_received        ; your_hand_count + your_discard_count
+u8  has_rolled_this_turn ; 0 - не бросал, 1 - бросил в этом ходу
 
+; --- opp ---
 str opponent_player_id
 str opponent_player_name
 u16 opp_attr_count
-u16 opp_hand_count
-u16 opp_deck_count
+  * opp_attr_count:
+    str attr_row
+    u32 attr_max
+    u32 attr_current
+u16 opp_hand_count      ; id карт противника не передаются
+u16 opp_deck_count      ; id карт противника не передаются
 u16 opp_discard_count
+  * opp_discard_count:
+    u16 card_id
+u16 opp_received        ; opp_hand_count + opp_discard_count
 
 u16 ext_count
+  * ext_count:
+    str key
+    str value
 ```
 
-`state_seq` монотонно растёт: `1` - после первого действия и т.д.
-Клиент игнорирует пакеты с `state_seq` меньше уже применённого.
+**Пояснения:**
 
-`extensions` - контейнер `key -> value` для будущих правил (эффекты карт,
-щиты, дебаффы). Сервер заполнит его, когда появятся правила. Клиент,
-не знающий про поле, просто проигнорирует запись.
+- `length` и `opcode` - заголовок фрейма (см. [Формат пакета](#формат-пакета)). 
+`payload` начинается с `wire_version`.
+- За полями `*_count` сразу идут сами элементы: за
+  `your_attr_count` - пары `attr_row`/`attr_max`/`attr_current` * N; за
+  `your_hand_count` / `your_deck_count` / `your_discard_count` -
+  `u16 card_id` * N.
+- `your_received` и `opp_received` = `hand + discard`
+  соответствующей стороны. В `MatchStart` discard пуст, поэтому
+  `received == hand_count`. В `StateSync` discard может быть непустым.
+- `has_rolled_this_turn` - флаг уровня `Room`, общий для обоих
+  получателей (одинаковый в пакете для `P1` и для `P2`). `1` - текущий
+  игрок уже бросил кубик в этом ходу, повторный `RollDice` сервер
+  проигнорирует. Сбрасывается в `0` при смене хода
+  (`endTurn()` / автопереход по таймеру).
+- `opp_deck_count`: клиенту приходит только количество карт в
+  колоде противника, id не передаются. Для `your_deck_count` - id
+  передаются.
+- `ext_count` - контейнер `key -> value` для будущих правил
+  (эффекты, щиты, дебаффы). Сейчас сервер всегда отправляет `u16 0`.
+- `state_seq` монотонно растёт: `1` - после первого действия и т.д.
+  Клиент игнорирует пакеты с `state_seq` меньше уже применённого.
 
 ### Управление ходом
 
@@ -692,6 +805,41 @@ u16 ext_count
 
 Отмена асинхронного `async_wait` через `turnTimer_.cancel()` -
 колбэк срабатывает с `operation_aborted` и корректно выходит.
+
+**Бросок кубика.**
+
+`Session::handleMessage` диспатчит `RollDice` в
+`currentRoom_->handleRollDice(session)`.
+
+`Room::handleRollDice`:
+
+1. Проверяет `hasMatchState_ && gamePhase_ == Playing`.
+2. Определяет `callerId` по `hostSession_` / `guestSession_`.
+   Если это не участник комнаты - выход.
+3. Если `callerId != currentTurnPlayerId_` - пишет
+   `RollDice ignored: caller=... current=...` в лог и выходит.
+4. Если `hasRolledThisTurn_` уже `true` - пишет
+   `RollDice ignored: already rolled this turn by ...` в лог и выходит.
+5. Устанавливает `hasRolledThisTurn_ = true`.
+6. Генерирует `diceValue ∈ [1..6]` (`uniform_int_distribution`).
+7. Восстанавливает ману текущего игрока (если `mana.current < mana.max`):
+   `mana.current = min(mana.current + diceValue, mana.max)`.
+8. Бонусный добор карт (с тем же лимитом, что и `endTurn`):
+    - `diceValue == 1` -> добрать 1 карту;
+    - `diceValue == 6` -> добрать 2 карты;
+    - `diceValue == 2..5` -> без добора.
+      Каждый добор проверяет `received = hand + discard < kDeckSize (30)`.
+9. Собирает `DiceRollResult` с `u8 diceValue` и отправляет
+   обоим игрокам (`hostSession_` + `guestSession_`).
+10. `broadcastStateSync()` - оба клиента видят обновлённое состояние
+    с `has_rolled_this_turn = 1`, новой маной, новыми картами и
+    `state_seq++`.
+
+Сброс `has_rolled_this_turn`. В `endTurn()` (ручное или
+автопереключение по таймеру) флаг сбрасывается в `false` в самом
+начале, вместе с переключением `currentTurnPlayerId_` и
+`currentTurnTime_ = turnTimeLimit_`. Новый текущий игрок начинает
+ход с `has_rolled_this_turn = 0`.
 
 **Стартовая инициализация.** 
 
@@ -805,6 +953,65 @@ client A                        server                    client B
 `StateSync` обоим игрокам, `current_turn_time` уменьшился на 1,
 `state_seq++`
 
+**Бросок кубика (текущим игроком, выпало 4):**
+
+```
+-> [u16 3][u8 0x05]
+  hex: 03 00 05
+
+<- [u16 3][u8 0x92][u8 4]
+  hex: 03 00 92 04
+
+<- [u16 ...][u8 0x91][...]
+  StateSync обоим игрокам: mana.current +4, state_seq++,
+  has_rolled_this_turn = 1
+```
+
+**Бросок кубика (не текущим игроком):**
+
+```
+-> [u16 3][u8 0x05]
+```
+`DiceRollResult` и `StateSync` не рассылаются; 
+
+В логе сервера:
+`RollDice ignored: caller = P2 current = P1`
+
+**Повторный бросок в том же ходу:**
+
+```
+-> [u16 3][u8 0x05]
+```
+`DiceRollResult` и `StateSync` не рассылаются; 
+
+В логе сервера:
+`RollDice ignored: already rolled this turn by P1`
+
+**Бросок кубика (выпало 1 или 6 - с бонусным добором):**
+
+```
+-> [u16 3][u8 0x05]
+
+<- [u16 3][u8 0x92][u8 01]   ; dice = 1
+  hex: 03 00 92 01
+   (или 03 00 92 06 для dice = 6)
+
+<- [u16 ...][u8 0x91][...]
+  StateSync: mana.current +1 (или +6), в your_hand добавлена
+  1 карта (или 2 карты), в your_deck на 1 (или 2) карты меньше,
+  state_seq++, has_rolled_this_turn = 1
+```
+
+**Бросок кубика (лимит `hand + discard >= 30`):**
+
+```
+-> [u16 3][u8 0x05]
+<- [u16 3][u8 0x92][u8 06]   ; dice = 6, но добор не выполняется
+<- [u16 ...][u8 0x91][...]
+  StateSync: mana.current +6, руки/колоды не меняются,
+  state_seq++, has_rolled_this_turn = 1. drawCard() просто возвращает false.
+```
+
 ### Примеры формата пакетов сервера при MatchStart, StateSync, EndTurn
 
 Контекст для примеров:
@@ -881,10 +1088,10 @@ Payload - полный snapshot (в нашем примере 198 байт, па
 ##### Тик #1: `state_seq = 1`, `current_turn_time = 29`
 
 ```
-BB 00                                                    ; length = 0xBB = 187 (opcode + payload)
+BC 00                                                    ; length = 0xBC = 188 (opcode + payload)
 91                                                       ; opcode = 0x91 (StateSync)
 
-; --- payload (186 байт) ---
+; --- payload (187 байт) ---
 02 00 00 00                                              ; wire_version = 2
 2A 53 DF 41                                              ; registry_version
 01 00 00 00                                              ; state_seq = 1
@@ -897,7 +1104,7 @@ BB 00                                                    ; length = 0xBB = 187 (
 1D                                                       ; current_turn_time = 29
 1E                                                       ; turn_time_limit  = 30
 
-; --- me (84 байта) ---
+; --- me (85 байт) ---
 02 00 50 31                                              ; your_player_id  = "P1"
 05 00 41 6C 69 63 65                                     ; your_player_name = "Alice"
 03 00                                                    ; your_attr_count
@@ -910,6 +1117,7 @@ BB 00                                                    ; length = 0xBB = 187 (
 06 00 07 00 08 00                                        ;   deck ids
 00 00                                                    ; your_discard_count = 0
 05 00                                                    ; your_hand+discard = 5
+00                                                       ; has_rolled_this_turn = 0
 
 ; --- opp (66 байт) ---
 02 00 50 32                                              ; opp_player_id = "P2"
@@ -923,7 +1131,7 @@ BB 00                                                    ; length = 0xBB = 187 (
 00 00                                                    ; opp_discard_count = 0
 05 00                                                    ; opp_hand+discard = 5
 
-00 00                                                    ; ext_count = 0                                                    ; ext_count = 0
+00 00                                                    ; ext_count = 0
 ```
 
 ##### Тик #2: `state_seq = 2`, `current_turn_time = 28`
@@ -935,7 +1143,9 @@ BB 00                                                    ; length = 0xBB = 187 (
 1D            ->  1C              ; cur_time   29 -> 28
 ```
 
-Всё остальное (рука, колода, атрибуты, `current_turn_player_id`, `turn_number`) - то же самое. 
+Байт `has_rolled_this_turn` остаётся `00`, пока текущий игрок не
+бросит кубик. Всё остальное (рука, колода, атрибуты,
+`current_turn_player_id`, `turn_number`) - то же самое.
 
 ##### Тик #3 … #N
 
@@ -983,6 +1193,8 @@ current_turn_player_id -> 02 00 50 32 ("P1" -> "P2")
 turn_number            -> 02
 current_turn_time      -> 1E (28 -> 30)
 turn_time_limit        -> 1E (без изменений)
+has_rolled_this_turn   -> 00 (сброшен в 0 для нового хода;
+                            если P1 бросал до EndTurn - 01)
 
 opp_hand_count         -> 06 00 (5 -> 6)
 opp_hand+discard       -> 06 00 (5 -> 6)
@@ -990,7 +1202,7 @@ opp_deck_count         -> 02 00 (3 -> 2)
 ```
 
 `P1` не добирал - блок `your_*` без изменений. В блоке `opp_*` у `P2`
-рука 5 -> 6, колода 3 -> 2. 
+рука 5 -> 6, колода 3 -> 2.
 
 В логе сервера: `Draw: P2 card=35 hand=6 deck=2 received=6`.
 
@@ -1002,6 +1214,7 @@ current_turn_player_id -> 02 00 50 32 ("P1" -> "P2")
 turn_number            -> 02
 current_turn_time      -> 1E (28 -> 30)
 turn_time_limit        -> 1E (без изменений)
+has_rolled_this_turn   -> 00 (сброшен в 0 для нового хода)
 
 your_hand_count        -> 06 00 (5 -> 6)
 your_hand+discard      -> 06 00 (5 -> 6)
@@ -1027,6 +1240,27 @@ your_deck_count        -> 02 00 (3 -> 2)
 `Draw skipped: P2 at max received (30 >= 30)`. Клиент покажет
 `CardCountPlayer` = `30/30`.
 
+#### 4. `DiceRollResult (0x92)` - результат броска кубика
+
+Сервер рассылает обоим игрокам сразу после валидного `RollDice`,
+перед `StateSync`. Payload - ровно 1 байт (`u8 dice_value`).
+Полный пакет всегда 4 байта.
+
+Для `dice_value = 4`:
+
+```
+03 00                                                    ; length = 3 (opcode + payload)
+92                                                       ; opcode = 0x92 (DiceRollResult)
+04                                                       ; dice_value = 4
+```
+
+Для `dice_value = 1` (`03 00 92 01`), `6` (`03 00 92 06`) - байт
+`dice_value` меняется, длина пакета та же.
+
+Сразу за `DiceRollResult` уходит `StateSync (0x91)` с обновлённым
+состоянием (`state_seq++`, `has_rolled_this_turn = 1`, новая мана,
+возможно новые карты в `your_hand` / `your_deck`).
+
 #### Если `EndTurn` шлёт не текущий игрок
 
 Сервер ничего не отвечает (ни `StateSync`, ни `Error`). `endTurn()`
@@ -1037,6 +1271,49 @@ your_deck_count        -> 02 00 (3 -> 2)
 ```
 [ROOM:ROOM-1234] EndTurn ignored: caller = P1 current = P2
 ```
+
+#### `EndTurn` после `RollDice`
+
+Если текущий игрок сначала бросил кубик, а потом шлёт `EndTurn`,
+последовательность пакетов следующая:
+
+```
+1. RollDice (0x05)              <- клиент, текущий игрок
+2. DiceRollResult (0x92)        -> обоим игрокам, значение кубика
+3. StateSync (0x91)             -> обоим игрокам:
+                                   has_rolled_this_turn = 1,
+                                   mana / карты обновлены,
+                                   state_seq++
+4. EndTurn (0x04)               <- клиент, тот же игрок
+5. StateSync (0x91)             -> обоим игрокам:
+                                   has_rolled_this_turn = 0,
+                                   current_turn_player_id новый,
+                                   current_turn_time = 30,
+                                   turn_number++,
+                                   state_seq++
+```
+
+Если текущий игрок не бросал кубик и шлёт `EndTurn` - шаги `1`-`3`
+отсутствуют, сразу `4`-`5`. Поле `has_rolled_this_turn` в обоих
+случаях в результирующем `StateSync` равно `00` - `endTurn()` 
+сбрасывает флаг для нового хода.
+
+В логе сервера последовательность видна так:
+
+```
+[ROOM:ROOM-1234] Dice=4 by P1 mana 10->10/10
+[ROOM:ROOM-1234] >> StateSync seq=31 to P1 payload=...B
+[ROOM:ROOM-1234] >> StateSync seq=31 to P2 payload=...B
+[ROOM:ROOM-1234] EndTurn requested
+[ROOM:ROOM-1234] Draw: P2 card=35 hand=6 deck=2 received=6
+[ROOM:ROOM-1234] Turn -> P2 (turn #2)
+[ROOM:ROOM-1234] >> StateSync seq=32 to P1 payload=...B
+[ROOM:ROOM-1234] >> StateSync seq=32 to P2 payload=...B
+```
+
+Здесь `Dice=4` не изменил ману, потому что она уже была на `max`
+(`10->10/10`). Если бы мана была, например, `7/10`, было бы
+`mana 7->10/10` (cap на `max`).
 
 ### Почему бинарный формат
 

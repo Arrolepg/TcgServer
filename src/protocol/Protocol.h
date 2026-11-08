@@ -18,6 +18,7 @@ public:
         JoinRoom = 0x02,
         ListRooms = 0x03,
         EndTurn = 0x04,
+        RollDice = 0x05,
 
         Error = 0x80,
         CreateRoomResponse = 0x81,
@@ -26,6 +27,7 @@ public:
 
         MatchStart = 0x90,
         StateSync = 0x91,
+        DiceRollResult = 0x92,
     };
 
     static constexpr std::size_t kHeaderSize = 3;
