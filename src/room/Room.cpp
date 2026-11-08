@@ -449,7 +449,7 @@ void Room::handleRollDice(const std::shared_ptr<Session> &caller) {
     }
 
     auto dicePkt = Protocol::buildPacket(
-        Protocol::Opcode::DiceRollRResult,
+        Protocol::Opcode::DiceRollResult,
         buildDiceRollResultPayload(diceValue));
     if (hostSession_) hostSession_->send(dicePkt);
     if (guestSession_) guestSession_->send(dicePkt);

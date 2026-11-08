@@ -27,7 +27,7 @@ public:
 
         MatchStart = 0x90,
         StateSync = 0x91,
-        DiceRollRResult = 0x92,
+        DiceRollResult = 0x92,
     };
 
     static constexpr std::size_t kHeaderSize = 3;
