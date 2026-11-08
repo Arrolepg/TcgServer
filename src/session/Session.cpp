@@ -25,7 +25,7 @@ const char* opcodeName(Protocol::Opcode op) {
         case Protocol::Opcode::ListRoomsResponse: return "ListRoomsResponse";
         case Protocol::Opcode::MatchStart: return "MatchStart";
         case Protocol::Opcode::StateSync: return "StateSync";
-        case Protocol::Opcode::DiceRollResult: return "DiceRollRResult";
+        case Protocol::Opcode::DiceRollResult: return "DiceRollResult";
     }
     return "Unknown";
 }
