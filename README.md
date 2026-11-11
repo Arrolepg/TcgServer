@@ -55,7 +55,7 @@
    - [Расположение файла](#расположение-файла)
    - [Уровни логирования](#уровни-логирования)
    - [Приоритет источников](#приоритет-источников)
-   - [Проверка зашруженной конфигурации](#проверка-загруженной-конфигурации)
+   - [Проверка загруженной конфигурации](#проверка-загруженной-конфигурации)
 
 ---
 
@@ -421,7 +421,7 @@ Boost SDK **не попадает в runtime** - Asio header-only, весь ну
 - **Protocol** - бинарный `Writer` / `Reader` (u8 / u16 / u32 / string),
   сборка и парсинг фреймов.
 - **Logger** - уровни, компоненты, ID сессии, hex-дампы, потокобезопасность.
-- **Utils** - преобразование ANSI → UTF-8, генерация ID комнат.
+- **Utils** - преобразование ANSI -> UTF-8, генерация ID комнат.
 - **Config** - парсинг `config.ini`.
 
 ---
@@ -751,7 +751,7 @@ u16 ext_count
 На `Room` заведён
 `boost::asio::steady_timer`. Когда матч инициализирован
 (`initializeGame` -> `startTurnTimer`), сервер запускает
-`scheduleNextTick`: `expires_after(1s)`, `async_wait` → `onTurnTick`.
+`scheduleNextTick`: `expires_after(1s)`, `async_wait` -> `onTurnTick`.
 
 В `onTurnTick`:
 
@@ -1358,7 +1358,7 @@ port = 8080
 |---|---|
 | Windows (exe) | Рядом с `TcgServer.exe` - `build\Debug\config.ini` |
 | Linux / macOS (бинарник) | Рядом с `TcgServer` или в текущей директории |
-| Docker | Volume `tcgserver_tcg-config` → `/app/config/config.ini` |
+| Docker | Volume `tcgserver_tcg-config` -> `/app/config/config.ini` |
 
 Подробнее про правку в Docker - см. раздел [Docker](#docker).
 
